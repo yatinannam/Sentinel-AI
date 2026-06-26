@@ -19,3 +19,10 @@ Welcome to the SentinelAI reference documentation directory. This directory cont
     *   Migration details from local JSON file persistence to transactional SQLite.
     *   Database tables, relationships, and settings indexing schemas.
     *   Dependency adjustments (`better-sqlite3`).
+4.  **[ffmpeg.dll & tsconfig.json Troubleshooting](file:///d:/The%20Proj/SentinelAI/documents/04_ffmpeg_dll_and_tsconfig_troubleshooting.md)**
+    *   Diagnosis of resource locking on `ffmpeg.dll` by the background system tray application.
+    *   TypeScript module resolution target optimization.
+5.  **[Auto-Documentation System](file:///d:/The%20Proj/SentinelAI/documents/05_auto_documentation_system.md)**
+    *   Setup of project-scoped AI instructions in `.agents/AGENTS.md`.
+    *   Automating the logging of user prompts and technical changes.
+
