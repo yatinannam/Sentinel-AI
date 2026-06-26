@@ -4,4 +4,4 @@ dist-electron/
 dist-renderer/
 *.log
 .vscode/
-.idea/
+.idea/

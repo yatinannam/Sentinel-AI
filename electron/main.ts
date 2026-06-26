@@ -1,6 +1,7 @@
 import { app, BrowserWindow, ipcMain, Tray, Menu, dialog } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
+import * as os from 'os';
 import { db } from './services/database';
 import { quarantine } from './services/quarantine';
 import { aiScanner } from './services/aiScanner';
@@ -170,11 +171,44 @@ ipcMain.handle('select-folder', async () => {
   return result.filePaths[0] || null;
 });
 
+let isScanPaused = false;
+let isScanRunning = false;
+let isScanCancelled = false;
+
+async function checkPause() {
+  while (isScanPaused && !isScanCancelled) {
+    await new Promise(resolve => setTimeout(resolve, 300));
+  }
+}
+
+// IPC handles for scan control
+ipcMain.handle('pause-scan', () => {
+  isScanPaused = true;
+  return { success: true };
+});
+
+ipcMain.handle('resume-scan', () => {
+  isScanPaused = false;
+  return { success: true };
+});
+
+ipcMain.handle('cancel-scan', () => {
+  isScanCancelled = true;
+  isScanPaused = false; // Resume so checkPause resolves immediately
+  return { success: true };
+});
+
+ipcMain.handle('is-scan-paused', () => {
+  return isScanPaused;
+});
+
 // Deep / Custom scans execution
 ipcMain.handle('run-system-scan', async (_, scanPath: string) => {
   if (!mainWindow) return { success: false };
 
   console.log(`[Scanner] Running scan on directory: ${scanPath}`);
+  isScanPaused = false;
+  isScanCancelled = false;
   
   // Asynchronous recursive scanner
   scanDirectoryAsync(scanPath);
@@ -182,76 +216,98 @@ ipcMain.handle('run-system-scan', async (_, scanPath: string) => {
 });
 
 async function scanDirectoryAsync(dirPath: string) {
-  const files: string[] = [];
-  collectExecutables(dirPath, files);
+  isScanRunning = true;
+  isScanPaused = false;
 
-  if (files.length === 0) {
-    sendScanProgress('System Scan', 'Scan finished. No executables found.', 100);
-    return;
-  }
+  try {
+    const files: string[] = [];
+    collectExecutables(dirPath, files);
 
-  let threatCount = 0;
-  const settings = db.getSettings();
-
-  for (let i = 0; i < files.length; i++) {
-    const file = files[i];
-    const progress = Math.round(((i + 1) / files.length) * 100);
-    
-    sendScanProgress('System Scan', `Scanning file ${i + 1}/${files.length}: ${path.basename(file)}`, progress);
-
-    const scanResult = await yaraScanner.scanFile(file);
-    let isMalicious = scanResult.isMalicious;
-    let threatName = scanResult.matchedRules[0]?.name || '';
-    let category = scanResult.matchedRules[0]?.category || '';
-    let severity: 'low' | 'medium' | 'high' | 'critical' = scanResult.matchedRules[0]?.severity || 'high';
-    let confidence = 100;
-    let reasons = scanResult.matchedRules[0]?.description ? [scanResult.matchedRules[0].description] : [];
-
-    // If YARA is clean, run AI prediction
-    if (!isMalicious) {
-      const aiResult = await aiScanner.analyzeFile(file, scanResult.hash);
-      if (aiResult.threatType !== 'Safe') {
-        isMalicious = true;
-        threatName = aiResult.threatType;
-        category = aiResult.threatType;
-        severity = aiResult.severity;
-        confidence = aiResult.confidence;
-        reasons = aiResult.reasons;
-      }
+    if (files.length === 0) {
+      sendScanProgress('System Scan', 'Scan finished. No executables found.', 100);
+      return;
     }
 
-    if (isMalicious) {
-      threatCount++;
-      let actionTaken = 'None';
-      let status: 'Quarantined' | 'Detected' = 'Detected';
+    let threatCount = 0;
+    const settings = db.getSettings();
 
-      if (settings.autoQuarantine) {
-        try {
-          await quarantine.quarantineFile(file, scanResult.hash);
-          status = 'Quarantined';
-          actionTaken = 'Quarantined';
-        } catch (err) {
-          actionTaken = 'Quarantine Failed';
+    for (let i = 0; i < files.length; i++) {
+      await checkPause();
+      if (isScanCancelled) break;
+      const file = files[i];
+      const progress = Math.round(((i + 1) / files.length) * 100);
+
+      // If paused, send a quick update so UI changes immediately
+      if (isScanPaused) {
+        sendScanProgress('System Scan', 'Scan Paused', progress);
+        await checkPause();
+      }
+      if (isScanCancelled) break;
+      
+      sendScanProgress('System Scan', `Scanning file ${i + 1}/${files.length}: ${path.basename(file)}`, progress);
+
+      const scanResult = await yaraScanner.scanFile(file);
+      let isMalicious = scanResult.isMalicious;
+      let threatName = scanResult.matchedRules[0]?.name || '';
+      let category = scanResult.matchedRules[0]?.category || '';
+      let severity: 'low' | 'medium' | 'high' | 'critical' = scanResult.matchedRules[0]?.severity || 'high';
+      let confidence = 100;
+      let reasons = scanResult.matchedRules[0]?.description ? [scanResult.matchedRules[0].description] : [];
+
+      // If YARA is clean, run AI prediction
+      if (!isMalicious) {
+        const aiResult = await aiScanner.analyzeFile(file, scanResult.hash);
+        if (aiResult.threatType !== 'Safe') {
+          isMalicious = true;
+          threatName = aiResult.threatType;
+          category = aiResult.threatType;
+          severity = aiResult.severity;
+          confidence = aiResult.confidence;
+          reasons = aiResult.reasons;
         }
       }
 
-      const incident = db.addIncident({
-        name: threatName,
-        path: file,
-        hash: scanResult.hash,
-        type: category.toUpperCase(),
-        severity: severity,
-        confidence: confidence,
-        status: status,
-        actionTaken: actionTaken,
-        details: reasons.join('. ')
-      });
+      if (isMalicious) {
+        threatCount++;
+        let actionTaken = 'None';
+        let status: 'Quarantined' | 'Detected' = 'Detected';
 
-      mainWindow?.webContents.send('incident-detected', incident);
+        if (settings.autoQuarantine) {
+          try {
+            await quarantine.quarantineFile(file, scanResult.hash);
+            status = 'Quarantined';
+            actionTaken = 'Quarantined';
+          } catch (err) {
+            actionTaken = 'Quarantine Failed';
+          }
+        }
+
+        const incident = db.addIncident({
+          name: threatName,
+          path: file,
+          hash: scanResult.hash,
+          type: category.toUpperCase(),
+          severity: severity,
+          confidence: confidence,
+          status: status,
+          actionTaken: actionTaken,
+          details: reasons.join('. ')
+        });
+
+        mainWindow?.webContents.send('incident-detected', incident);
+      }
     }
-  }
 
-  sendScanProgress('System Scan', `Scan finished. Scanned ${files.length} executables, found ${threatCount} threat(s).`, 100);
+    if (isScanCancelled) {
+      sendScanProgress('System Scan', 'System Idle', 0);
+    } else {
+      sendScanProgress('System Scan', `Scan finished. Scanned ${files.length} executables, found ${threatCount} threat(s).`, 100);
+    }
+  } finally {
+    isScanRunning = false;
+    isScanPaused = false;
+    isScanCancelled = false;
+  }
 }
 
 function collectExecutables(dir: string, fileList: string[], depth = 0) {
@@ -336,3 +392,100 @@ ipcMain.on('ai-scan-request', async (_, data: { filePath: string; hash: string }
 ipcMain.on('trigger-quick-scan', () => {
   mainWindow?.webContents.send('trigger-quick-scan');
 });
+
+// CPU tick calculation variables
+let lastCpuTicks = getCpuTicks();
+
+function getCpuTicks() {
+  const cpus = os.cpus();
+  let user = 0;
+  let nice = 0;
+  let sys = 0;
+  let idle = 0;
+  let irq = 0;
+  if (!cpus) return { idle: 0, total: 0 };
+  for (const cpu of cpus) {
+    user += cpu.times.user;
+    nice += cpu.times.nice;
+    sys += cpu.times.sys;
+    idle += cpu.times.idle;
+    irq += cpu.times.irq;
+  }
+  const total = user + nice + sys + idle + irq;
+  return { idle, total };
+}
+
+function getCpuUsagePercentage() {
+  const currentTicks = getCpuTicks();
+  const idleDiff = currentTicks.idle - lastCpuTicks.idle;
+  const totalDiff = currentTicks.total - lastCpuTicks.total;
+  
+  lastCpuTicks = currentTicks;
+
+  if (totalDiff === 0) return 0;
+  const usage = 100 - Math.round((100 * idleDiff) / totalDiff);
+  return Math.min(100, Math.max(0, usage));
+}
+
+function getRamUsagePercentage() {
+  const total = os.totalmem();
+  const free = os.freemem();
+  const used = total - free;
+  if (total === 0) return 0;
+  return Math.min(100, Math.max(0, Math.round((used / total) * 100)));
+}
+
+// System stats and specifications IPC handlers
+ipcMain.handle('get-system-stats', () => {
+  return {
+    cpu: getCpuUsagePercentage(),
+    ram: getRamUsagePercentage()
+  };
+});
+
+ipcMain.handle('get-system-specs', () => {
+  const cpus = os.cpus();
+  const cpuModel = cpus && cpus.length > 0 ? cpus[0].model.trim() : 'Unknown CPU';
+  const totalMemoryGB = Math.round(os.totalmem() / (1024 * 1024 * 1024));
+  
+  // Clean up CPU model for visual presentation
+  let cleanCpu = cpuModel
+    .replace(/\(R\)/g, '')
+    .replace(/\(TM\)/g, '')
+    .replace(/\s+CPU\s+/g, ' ')
+    .split('@')[0]
+    .trim();
+
+  // Handle common CPU names formatting
+  if (cleanCpu.includes('Intel')) {
+    const parts = cleanCpu.split('Intel Core');
+    if (parts.length > 1) {
+      cleanCpu = 'Intel Core' + parts[1];
+    }
+  }
+
+  let osName = 'Windows';
+  const platform = os.platform();
+  if (platform === 'win32') {
+    const release = os.release();
+    const buildNum = parseInt(release.split('.')[2]) || 0;
+    if (buildNum >= 22000) {
+      osName = 'Windows 11';
+    } else {
+      osName = 'Windows 10';
+    }
+  } else if (platform === 'darwin') {
+    osName = 'macOS';
+  } else if (platform === 'linux') {
+    osName = 'Linux';
+  }
+
+  return {
+    cpu: cleanCpu,
+    ram: `${totalMemoryGB} GB`,
+    os: osName,
+    hostname: os.hostname(),
+    arch: os.arch()
+  };
+});
+

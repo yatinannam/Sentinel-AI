@@ -58,5 +58,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     const subscription = () => callback();
     ipcRenderer.on('trigger-quick-scan', subscription);
     return () => ipcRenderer.removeListener('trigger-quick-scan', subscription);
-  }
+  },
+  getSystemStats: () => ipcRenderer.invoke('get-system-stats'),
+  getSystemSpecs: () => ipcRenderer.invoke('get-system-specs'),
+  pauseScan: () => ipcRenderer.invoke('pause-scan'),
+  resumeScan: () => ipcRenderer.invoke('resume-scan'),
+  isScanPaused: () => ipcRenderer.invoke('is-scan-paused'),
+  cancelScan: () => ipcRenderer.invoke('cancel-scan')
 });

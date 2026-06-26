@@ -1,9 +1,9 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { 
   Shield, Cpu, Network, History, FileText, Settings as SettingsIcon, 
-  Trash2, RotateCcw, AlertTriangle, CheckCircle, Search, RefreshCw, 
+  Trash2, RotateCcw, AlertTriangle, Search, RefreshCw, 
   Terminal, HardDrive, Play, FolderOpen, Eye, EyeOff, Upload,
-  Layers, Lock
+  Layers, Lock, Laptop, Pause
 } from 'lucide-react';
 
 // TypeScript Interfaces for IPC Data
@@ -120,6 +120,7 @@ const App: React.FC = () => {
   const [scanType, setScanType] = useState<string>('Quick Scan');
   const [scanStatus, setScanStatus] = useState<string>('System Idle');
   const [scanProgress, setScanProgress] = useState<number>(0);
+  const [isScanPaused, setIsScanPaused] = useState<boolean>(false);
   const [selectedScanPath, setSelectedScanPath] = useState<string>('C:\\');
   const [isDragOver, setIsDragOver] = useState(false);
 
@@ -129,6 +130,19 @@ const App: React.FC = () => {
   // Stats / CPU Usage simulation
   const [cpuUsage, setCpuUsage] = useState(3);
   const [ramUsage, setRamUsage] = useState(38);
+  const [systemSpecs, setSystemSpecs] = useState<{
+    cpu: string;
+    ram: string;
+    os: string;
+    hostname: string;
+    arch: string;
+  }>({
+    cpu: 'Loading CPU...',
+    ram: 'Loading RAM...',
+    os: 'Loading OS...',
+    hostname: 'Loading Host...',
+    arch: 'x64'
+  });
 
   // File Drop Ref
   const dropZoneRef = useRef<HTMLDivElement>(null);
@@ -176,6 +190,17 @@ const App: React.FC = () => {
         setScanStatus(update.status);
         setScanProgress(update.progress);
         
+        if (update.status === 'Scan Paused') {
+          setIsScanPaused(true);
+        } else if (update.progress === 100 || update.status.includes('finished') || update.status.includes('Idle')) {
+          setIsScanPaused(false);
+          if (update.progress === 100 || update.status.includes('finished')) {
+            setTimeout(() => {
+              setScanStatus(prev => (prev.includes('finished') || prev.includes('Scan finished') ? 'System Idle' : prev));
+            }, 15000);
+          }
+        }
+        
         // Refresh databases if threat list updated
         electronAPI.getIncidents().then((data: Incident[]) => setIncidents(data));
         electronAPI.getQuarantine().then((data: QuarantinedFile[]) => setQuarantineList(data));
@@ -212,19 +237,66 @@ const App: React.FC = () => {
     }
   }, [processes, settings.notifications]);
 
-  // CPU and RAM usage simulation loop
+  // Load system specs on mount
   useEffect(() => {
-    const timer = setInterval(() => {
-      // Modulate usage slightly
-      setCpuUsage(Math.round(2 + Math.random() * 4));
-      setRamUsage(Math.round(36 + Math.random() * 3));
-    }, 3000);
+    if (electronAPI && electronAPI.getSystemSpecs) {
+      electronAPI.getSystemSpecs().then((specs: any) => {
+        if (specs) {
+          setSystemSpecs(specs);
+        }
+      }).catch((err: any) => {
+        console.error('Failed to load system specs:', err);
+      });
+    }
+  }, []);
+
+  // CPU and RAM real-time usage polling loop
+  useEffect(() => {
+    if (!electronAPI || !electronAPI.getSystemStats) return;
+
+    const fetchStats = async () => {
+      try {
+        const stats = await electronAPI.getSystemStats();
+        if (stats) {
+          setCpuUsage(stats.cpu);
+          setRamUsage(stats.ram);
+        }
+      } catch (err) {
+        console.error('Failed to fetch system stats:', err);
+      }
+    };
+
+    fetchStats(); // initial fetch
+
+    const timer = setInterval(fetchStats, 2000);
     return () => clearInterval(timer);
   }, []);
 
   // Actions
+  const handleToggleScanPause = async () => {
+    if (electronAPI) {
+      if (isScanPaused) {
+        await electronAPI.resumeScan();
+        setIsScanPaused(false);
+      } else {
+        await electronAPI.pauseScan();
+        setIsScanPaused(true);
+      }
+    }
+  };
+
+  const handleCancelScan = async () => {
+    if (electronAPI) {
+      await electronAPI.cancelScan();
+      setIsScanPaused(false);
+      setScanStatus('System Idle');
+      setScanProgress(0);
+    }
+  };
+
   const handleQuickScan = () => {
     setScanType('Quick Scan');
+    setIsScanPaused(false);
     if (electronAPI) {
       electronAPI.runSystemScan(selectedScanPath);
     }
@@ -232,6 +304,7 @@ const App: React.FC = () => {
 
   const handleDeepScan = () => {
     setScanType('Deep Scan');
+    setIsScanPaused(false);
     if (electronAPI) {
       // Scan root path
       electronAPI.runSystemScan('C:\\');
@@ -249,6 +322,7 @@ const App: React.FC = () => {
 
   const handleCustomScan = () => {
     setScanType('Custom Directory Scan');
+    setIsScanPaused(false);
     if (electronAPI) {
       electronAPI.runSystemScan(selectedScanPath);
     }
@@ -323,6 +397,7 @@ const App: React.FC = () => {
       const filePath = (file as any).path; // Electron exposes path on File object
 
       if (filePath) {
+        setIsScanPaused(false);
         setScanStatus(`AI Analyzing dropped file: ${file.name}`);
         setScanProgress(30);
 
@@ -490,15 +565,78 @@ const App: React.FC = () => {
         {/* TOP HEADER BAR */}
         <header className="h-16 border-b border-slate-800/80 bg-[#0C1220]/80 backdrop-blur-md px-8 flex items-center justify-between select-none">
           <div>
-            {scanStatus.includes('Scanning') ? (
-              <div className="flex items-center gap-2.5 text-cyan-400">
-                <RefreshCw className="w-4 h-4 animate-spin text-[#00E5FF]" />
-                <span className="text-sm font-medium tracking-wide font-mono">{scanStatus} ({scanProgress}%)</span>
+            {scanStatus !== 'System Idle' ? (
+              <div className="flex items-center gap-3">
+                <div className="flex items-center gap-2.5 text-cyan-400">
+                  {isScanPaused ? (
+                    <Pause className="w-4 h-4 text-amber-400 animate-pulse" />
+                  ) : (scanProgress === 100 || scanStatus.includes('finished')) ? (
+                    <span className="w-4 h-4 rounded-full bg-green-500/10 border border-green-500/30 flex items-center justify-center text-green-400 font-bold text-xs">✓</span>
+                  ) : (
+                    <RefreshCw className="w-4 h-4 animate-spin text-[#00E5FF]" />
+                  )}
+                  <span className={`text-xs font-medium tracking-wide font-mono ${
+                    (scanProgress === 100 || scanStatus.includes('finished')) 
+                      ? 'text-green-400 font-semibold' 
+                      : isScanPaused 
+                        ? 'text-amber-400 font-semibold' 
+                        : 'text-[#00E5FF]'
+                  }`}>
+                    {(scanProgress === 100 || scanStatus.includes('finished')) ? 'Scan Completed' : isScanPaused ? 'Scan Paused' : scanStatus} ({scanProgress}%)
+                  </span>
+                </div>
+                
+                <div className="flex items-center gap-1.5">
+                  {scanProgress < 100 && !scanStatus.includes('finished') ? (
+                    <>
+                      <button
+                        onClick={handleToggleScanPause}
+                        className={`px-2 py-0.5 rounded border text-[10px] font-bold font-mono transition-all duration-200 ${
+                          isScanPaused
+                            ? 'border-green-500/30 bg-green-500/10 text-green-400 hover:bg-green-500/20'
+                            : 'border-amber-500/30 bg-amber-500/10 text-amber-400 hover:bg-amber-500/20'
+                        }`}
+                        title={isScanPaused ? "Resume system scan" : "Pause system scan"}
+                      >
+                        {isScanPaused ? 'RESUME' : 'PAUSE'}
+                      </button>
+
+                      <button
+                        onClick={handleCancelScan}
+                        className="px-2 py-0.5 rounded border border-red-500/30 bg-red-500/10 text-red-400 hover:bg-red-500/20 text-[10px] font-bold font-mono transition-all duration-200"
+                        title="Stop and cancel scan"
+                      >
+                        STOP
+                      </button>
+                    </>
+                  ) : (
+                    <button
+                      onClick={() => {
+                        setScanStatus('System Idle');
+                        setScanProgress(0);
+                      }}
+                      className="px-2 py-0.5 rounded border border-slate-700 hover:bg-slate-800 text-[10px] font-bold font-mono text-slate-300 transition"
+                      title="Dismiss scan report"
+                    >
+                      DISMISS
+                    </button>
+                  )}
+                </div>
               </div>
             ) : (
-              <div className="flex items-center gap-2 text-green-400 bg-green-500/10 border border-green-500/20 px-3 py-1 rounded-full text-xs font-medium">
-                <CheckCircle className="w-3.5 h-3.5 text-green-400" />
-                <span>Endpoint Protected. Zero active warnings.</span>
+              <div className="flex items-center gap-4 text-xs text-slate-400 bg-slate-900/40 px-4 py-2 rounded-xl border border-slate-800/80">
+                <div className="flex items-center gap-1.5 border-r border-slate-800/60 pr-3.5">
+                  <Laptop className="w-3.5 h-3.5 text-cyan-400" />
+                  <span className="font-semibold text-slate-200">{systemSpecs.os} ({systemSpecs.arch})</span>
+                </div>
+                <div className="flex items-center gap-1.5 border-r border-slate-800/60 pr-3.5 max-w-[240px] truncate">
+                  <Cpu className="w-3.5 h-3.5 text-emerald-400" />
+                  <span className="text-slate-300 font-medium" title={systemSpecs.cpu}>{systemSpecs.cpu}</span>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <Layers className="w-3.5 h-3.5 text-purple-400" />
+                  <span className="text-slate-300 font-medium">{systemSpecs.ram} RAM</span>
+                </div>
               </div>
             )}
           </div>
@@ -1032,12 +1170,16 @@ const App: React.FC = () => {
                               <td className="py-4 px-5">
                                 <div className="flex flex-col gap-0.5">
                                   <span className="font-bold text-white text-sm">{inc.name}</span>
-                                  <span className="text-[10px] text-slate-500 font-mono font-normal">SHA256: {inc.hash}</span>
+                                  <span className="text-[10px] text-slate-500 font-mono font-normal" title={inc.hash}>
+                                    SHA256: {inc.hash.slice(0, 8)}...{inc.hash.slice(-8)}
+                                  </span>
                                 </div>
                               </td>
                               <td className="py-4 px-5 font-mono text-[#00E5FF] font-semibold">{inc.type}</td>
-                              <td className="py-4 px-5 font-mono text-slate-300 max-w-xs truncate" title={inc.path}>
-                                {inc.path}
+                              <td className="py-4 px-5">
+                                <div className="font-mono text-slate-300 text-xs truncate max-w-[240px]" title={inc.path}>
+                                  {inc.path}
+                                </div>
                               </td>
                               <td className="py-4 px-5">
                                 <span className={`px-2.5 py-1 rounded-full border text-[10px] font-semibold ${getSeverityColor(inc.severity)}`}>
@@ -1045,14 +1187,16 @@ const App: React.FC = () => {
                                 </span>
                               </td>
                               <td className="py-4 px-5 font-mono font-bold text-white">{inc.confidence}%</td>
-                              <td className="py-4 px-5 text-slate-400">{new Date(inc.time).toLocaleString()}</td>
+                              <td className="py-4 px-5 text-slate-400 whitespace-nowrap">{new Date(inc.time).toLocaleString()}</td>
                               <td className="py-4 px-5">
-                                <div className="flex flex-col gap-1.5 items-start">
+                                <div className="flex flex-col gap-1 items-start max-w-[200px]">
                                   <span className={`px-2 py-0.5 rounded text-[10px] font-bold border ${getStatusColor(inc.status)}`}>
                                     {inc.actionTaken}
                                   </span>
                                   {inc.details && (
-                                    <span className="text-[9px] text-slate-400 font-mono max-w-xs">{inc.details}</span>
+                                    <div className="text-[10px] text-slate-400 font-mono line-clamp-2 mt-0.5 leading-normal" title={inc.details}>
+                                      {inc.details}
+                                    </div>
                                   )}
                                 </div>
                               </td>
@@ -1212,16 +1356,71 @@ const App: React.FC = () => {
               </div>
 
               {/* ACTIVE SCAN PROGRESS BAR */}
-              {scanStatus.includes('Scanning') && (
-                <div className="glass-panel rounded-2xl p-6 flex flex-col gap-4 animate-pulse">
+              {scanStatus !== 'System Idle' && (
+                <div className={`glass-panel rounded-2xl p-6 flex flex-col gap-4 ${(scanProgress === 100 || scanStatus.includes('finished') || isScanPaused) ? '' : 'animate-pulse'}`}>
                   <div className="flex justify-between items-center text-xs font-mono">
-                    <span className="text-[#00E5FF] font-semibold">{scanType} Active</span>
-                    <span className="text-white font-bold">{scanProgress}%</span>
+                    <span className={`font-semibold ${
+                      (scanProgress === 100 || scanStatus.includes('finished')) 
+                        ? 'text-green-400 font-semibold' 
+                        : isScanPaused 
+                          ? 'text-amber-400 font-semibold' 
+                          : 'text-[#00E5FF]'
+                    }`}>
+                      {scanType} {(scanProgress === 100 || scanStatus.includes('finished')) ? '(Completed)' : isScanPaused ? '(Paused)' : '(Active)'}
+                    </span>
+                    <div className="flex items-center gap-3">
+                      {scanProgress < 100 && !scanStatus.includes('finished') ? (
+                        <>
+                          <button
+                            onClick={handleToggleScanPause}
+                            className={`px-2 py-0.5 rounded border text-[10px] font-bold font-mono transition-all duration-200 ${
+                              isScanPaused
+                                ? 'border-green-500/30 bg-green-500/10 text-green-400 hover:bg-green-500/20'
+                                : 'border-amber-500/30 bg-amber-500/10 text-amber-400 hover:bg-amber-500/20'
+                            }`}
+                          >
+                            {isScanPaused ? 'RESUME SCAN' : 'PAUSE SCAN'}
+                          </button>
+
+                          <button
+                            onClick={handleCancelScan}
+                            className="px-2 py-0.5 rounded border border-red-500/30 bg-red-500/10 text-red-400 hover:bg-red-500/20 text-[10px] font-bold font-mono transition-all duration-200"
+                          >
+                            STOP SCAN
+                          </button>
+                        </>
+                      ) : (
+                        <button
+                          onClick={() => {
+                            setScanStatus('System Idle');
+                            setScanProgress(0);
+                          }}
+                          className="px-2 py-0.5 rounded border border-slate-700 hover:bg-slate-800 text-[10px] font-bold font-mono text-slate-300 transition"
+                        >
+                          DISMISS
+                        </button>
+                      )}
+                      <span className="text-white font-bold">{scanProgress}%</span>
+                    </div>
                   </div>
                   <div className="w-full h-3 bg-slate-800 rounded-full overflow-hidden">
-                    <div className="h-full bg-[#00E5FF] glow-cyan rounded-full transition-all duration-300" style={{ width: `${scanProgress}%` }} />
+                    <div className={`h-full rounded-full transition-all duration-300 ${
+                      (scanProgress === 100 || scanStatus.includes('finished')) 
+                        ? 'bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.5)]' 
+                        : isScanPaused 
+                          ? 'bg-amber-500 shadow-[0_0_8px_rgba(245,158,11,0.5)]' 
+                          : 'bg-[#00E5FF] glow-cyan'
+                    }`} style={{ width: `${scanProgress}%` }} />
                   </div>
-                  <p className="text-[10px] text-slate-400 font-mono truncate">{scanStatus}</p>
+                  <p className={`text-[10px] font-mono truncate ${
+                    (scanProgress === 100 || scanStatus.includes('finished')) 
+                      ? 'text-green-400/80 font-semibold' 
+                      : isScanPaused 
+                        ? 'text-amber-400/80' 
+                        : 'text-slate-400'
+                  }`}>
+                    {isScanPaused ? 'Scan execution halted. Press Resume to continue.' : scanStatus}
+                  </p>
                 </div>
               )}
 
