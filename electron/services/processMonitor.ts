@@ -39,47 +39,45 @@ class ProcessMonitorService {
   }
 
   private pollProcesses() {
-    // Run WMIC to get running processes. WMIC is fast and native on Windows.
-    const cmd = 'wmic process get CommandLine,Name,ParentProcessId,ProcessId,WorkingSetSize /FORMAT:csv';
+    // Run PowerShell command to retrieve running processes.
+    // Get-CimInstance Win32_Process is modern, fast and works when WMIC is deprecated.
+    const cmd = 'powershell -NoProfile -NonInteractive -WindowStyle Hidden -Command "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,CommandLine,WorkingSetSize | ConvertTo-Json -Compress"';
     
-    exec(cmd, (error, stdout) => {
+    exec(cmd, { maxBuffer: 1024 * 1024 * 10 }, (error, stdout) => {
       if (error) {
-        // Fallback for non-Windows or environments without WMIC
+        // Fallback for non-Windows or environments without PowerShell
         this.simulateProcesses();
         return;
       }
 
       try {
-        const processes = this.parseWmicOutput(stdout);
+        const processes = this.parsePowerShellOutput(stdout);
         this.analyzeProcesses(processes);
       } catch (err) {
         console.error('Failed to parse processes:', err);
+        this.simulateProcesses();
       }
     });
   }
 
-  private parseWmicOutput(stdout: string): ProcessTelemetry[] {
-    const lines = stdout.split(/\r?\n/);
+  private parsePowerShellOutput(stdout: string): ProcessTelemetry[] {
+    const raw = stdout.trim();
+    if (!raw) return [];
+
+    const parsed = JSON.parse(raw);
+    const rawProcesses = Array.isArray(parsed) ? parsed : [parsed];
     const processes: ProcessTelemetry[] = [];
 
-    // Header index maps: Node, CommandLine, Name, ParentProcessId, ProcessId, WorkingSetSize
-    for (let i = 1; i < lines.length; i++) {
-      const line = lines[i].trim();
-      if (!line) continue;
+    for (const proc of rawProcesses) {
+      if (!proc) continue;
 
-      // WMIC CSV format has a tendency to output commas inside quotes.
-      // We parse CSV row safely.
-      const parts = this.parseCsvRow(line);
-      if (parts.length < 6) continue;
-
-      // Node (parts[0]), CommandLine (parts[1]), Name (parts[2]), ParentProcessId (parts[3]), ProcessId (parts[4]), WorkingSetSize (parts[5])
-      const commandLine = parts[1] || '';
-      const name = parts[2] || '';
-      const parentPid = parseInt(parts[3]) || 0;
-      const pid = parseInt(parts[4]) || 0;
-      const workingSetSize = parseInt(parts[5]) || 0;
-
+      const pid = proc.ProcessId || 0;
       if (pid === 0) continue;
+
+      const parentPid = proc.ParentProcessId || 0;
+      const name = proc.Name || '';
+      const commandLine = proc.CommandLine || '';
+      const workingSetSize = proc.WorkingSetSize || 0;
 
       processes.push({
         pid,
@@ -96,26 +94,6 @@ class ProcessMonitorService {
     return processes;
   }
 
-  private parseCsvRow(row: string): string[] {
-    const result = [];
-    let current = '';
-    let inQuotes = false;
-
-    for (let i = 0; i < row.length; i++) {
-      const char = row[i];
-      if (char === '"') {
-        inQuotes = !inQuotes;
-      } else if (char === ',' && !inQuotes) {
-        result.push(current);
-        current = '';
-      } else {
-        current += char;
-      }
-    }
-    result.push(current);
-    return result;
-  }
-
   private analyzeProcesses(processes: ProcessTelemetry[]) {
     const analyzed: ProcessTelemetry[] = [];
     const settings = db.getSettings();
@@ -126,18 +104,22 @@ class ProcessMonitorService {
 
       // Check 1: PowerShell abuse
       if (nameLower.includes('powershell.exe')) {
-        if (
-          commandLineLower.includes('-ep bypass') ||
-          commandLineLower.includes('-executionpolicy bypass') ||
-          commandLineLower.includes('-w hidden') ||
-          commandLineLower.includes('-windowstyle hidden') ||
-          commandLineLower.includes('iex') ||
-          commandLineLower.includes('downloadstring') ||
-          commandLineLower.includes('-enc') ||
-          commandLineLower.includes('-encodedcommand')
-        ) {
-          proc.suspicious = true;
-          proc.reasons.push('PowerShell executed with execution bypass or hidden window style');
+        // Exclude our own monitoring query from being flagged
+        const isSelfQuery = commandLineLower.includes('get-ciminstance') && commandLineLower.includes('convertto-json');
+        if (!isSelfQuery) {
+          if (
+            commandLineLower.includes('-ep bypass') ||
+            commandLineLower.includes('-executionpolicy bypass') ||
+            commandLineLower.includes('-w hidden') ||
+            commandLineLower.includes('-windowstyle hidden') ||
+            commandLineLower.includes('iex') ||
+            commandLineLower.includes('downloadstring') ||
+            commandLineLower.includes('-enc') ||
+            commandLineLower.includes('-encodedcommand')
+          ) {
+            proc.suspicious = true;
+            proc.reasons.push('PowerShell executed with execution bypass or hidden window style');
+          }
         }
       }
 

@@ -64,5 +64,30 @@ contextBridge.exposeInMainWorld('electronAPI', {
   pauseScan: () => ipcRenderer.invoke('pause-scan'),
   resumeScan: () => ipcRenderer.invoke('resume-scan'),
   isScanPaused: () => ipcRenderer.invoke('is-scan-paused'),
-  cancelScan: () => ipcRenderer.invoke('cancel-scan')
+  cancelScan: () => ipcRenderer.invoke('cancel-scan'),
+  runMultiLayerScan: (filePath: string) => ipcRenderer.invoke('run-multi-layer-scan', filePath),
+  onMultiLayerScanProgress: (callback: (data: any) => void) => {
+    const subscription = (_event: any, data: any) => callback(data);
+    ipcRenderer.on('multi-layer-scan-progress', subscription);
+    return () => ipcRenderer.removeListener('multi-layer-scan-progress', subscription);
+  },
+  runNormalScan: () => ipcRenderer.invoke('run-normal-scan'),
+  runDeepScan: () => ipcRenderer.invoke('run-deep-scan'),
+  getScanHistory: () => ipcRenderer.invoke('get-scan-history'),
+  onScanReportCompleted: (callback: (data: any) => void) => {
+    const subscription = (_event: any, data: any) => callback(data);
+    ipcRenderer.on('scan-report-completed', subscription);
+    return () => ipcRenderer.removeListener('scan-report-completed', subscription);
+  },
+  checkForUpdates: () => ipcRenderer.invoke('check-for-updates'),
+  onTriggerUpdateCheck: (callback: () => void) => {
+    const subscription = () => callback();
+    ipcRenderer.on('trigger-update-check', subscription);
+    return () => ipcRenderer.removeListener('trigger-update-check', subscription);
+  },
+  onSettingsUpdated: (callback: (data: any) => void) => {
+    const subscription = (_event: any, data: any) => callback(data);
+    ipcRenderer.on('settings-updated', subscription);
+    return () => ipcRenderer.removeListener('settings-updated', subscription);
+  }
 });

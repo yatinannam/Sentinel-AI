@@ -26,6 +26,28 @@ export interface QuarantinedFile {
   date: string;
 }
 
+export interface ScanReport {
+  id: string;
+  date: string;
+  scanType: string;
+  duration: number; // in seconds
+  filesScanned: number;
+  filesSkipped: number;
+  threatsFound: number;
+  threatsRemoved: number;
+  securityScore: number;
+  cpuUsage: number;
+  detailsJson: string; // JSON string
+}
+
+export interface FileCacheEntry {
+  filePath: string;
+  hash: string;
+  mtime: number;
+  status: 'Safe' | 'Suspicious' | 'Malicious';
+  finalScore: number;
+}
+
 export interface Settings {
   aiSensitivity: number; // 1-100
   realTimeProtection: boolean;
@@ -34,6 +56,17 @@ export interface Settings {
   notifications: boolean;
   startWithWindows: boolean;
   virusTotalApiKey: string;
+  minimizeToTray: boolean;
+  autoUpdates: boolean;
+  aiDetection: boolean;
+  ransomwareShield: boolean;
+  usbProtection: boolean;
+  networkMonitoring: boolean;
+  desktopNotifications: boolean;
+  emailAlerts: boolean;
+  shareIntel: boolean;
+  cloudAi: boolean;
+  firstTimeUser: boolean;
 }
 
 const defaultSettings: Settings = {
@@ -43,7 +76,18 @@ const defaultSettings: Settings = {
   autoQuarantine: true,
   notifications: true,
   startWithWindows: false,
-  virusTotalApiKey: ''
+  virusTotalApiKey: '',
+  minimizeToTray: true,
+  autoUpdates: true,
+  aiDetection: true,
+  ransomwareShield: true,
+  usbProtection: true,
+  networkMonitoring: true,
+  desktopNotifications: true,
+  emailAlerts: false,
+  shareIntel: true,
+  cloudAi: true,
+  firstTimeUser: true
 };
 
 class DatabaseService {
@@ -81,12 +125,38 @@ class DatabaseService {
         )
       `).run();
 
+      // Dynamically migrate table columns if they do not exist
+      const columnsToAdd = [
+        { name: 'minimizeToTray', type: 'INTEGER DEFAULT 1' },
+        { name: 'autoUpdates', type: 'INTEGER DEFAULT 1' },
+        { name: 'aiDetection', type: 'INTEGER DEFAULT 1' },
+        { name: 'ransomwareShield', type: 'INTEGER DEFAULT 1' },
+        { name: 'usbProtection', type: 'INTEGER DEFAULT 1' },
+        { name: 'networkMonitoring', type: 'INTEGER DEFAULT 1' },
+        { name: 'desktopNotifications', type: 'INTEGER DEFAULT 1' },
+        { name: 'emailAlerts', type: 'INTEGER DEFAULT 0' },
+        { name: 'shareIntel', type: 'INTEGER DEFAULT 1' },
+        { name: 'cloudAi', type: 'INTEGER DEFAULT 1' },
+        { name: 'firstTimeUser', type: 'INTEGER DEFAULT 1' }
+      ];
+
+      for (const col of columnsToAdd) {
+        try {
+          this.db.prepare(`ALTER TABLE settings ADD COLUMN ${col.name} ${col.type}`).run();
+        } catch (e) {
+          // Column already exists, safe to ignore
+        }
+      }
+
       // Initialize default settings row if not exists
       this.db.prepare(`
         INSERT OR IGNORE INTO settings (
           id, aiSensitivity, realTimeProtection, networkProtection, 
-          autoQuarantine, notifications, startWithWindows, virusTotalApiKey
-        ) VALUES (1, 75, 1, 1, 1, 1, 0, '')
+          autoQuarantine, notifications, startWithWindows, virusTotalApiKey,
+          minimizeToTray, autoUpdates, aiDetection, ransomwareShield,
+          usbProtection, networkMonitoring, desktopNotifications, emailAlerts,
+          shareIntel, cloudAi, firstTimeUser
+        ) VALUES (1, 75, 1, 1, 1, 1, 0, '', 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1)
       `).run();
 
       // 2. Create incidents table
@@ -120,6 +190,38 @@ class DatabaseService {
           hash TEXT,
           size INTEGER,
           date TEXT
+        )
+      `).run();
+
+      // 4. Create scans table
+      this.db.prepare(`
+        CREATE TABLE IF NOT EXISTS scans (
+          id TEXT PRIMARY KEY,
+          date TEXT,
+          scanType TEXT,
+          duration INTEGER,
+          filesScanned INTEGER,
+          filesSkipped INTEGER,
+          threatsFound INTEGER,
+          threatsRemoved INTEGER,
+          securityScore INTEGER,
+          cpuUsage INTEGER,
+          detailsJson TEXT
+        )
+      `).run();
+
+      this.db.prepare(`
+        CREATE INDEX IF NOT EXISTS idx_scans_date ON scans(date DESC)
+      `).run();
+
+      // 5. Create file_cache table
+      this.db.prepare(`
+        CREATE TABLE IF NOT EXISTS file_cache (
+          filePath TEXT PRIMARY KEY,
+          hash TEXT,
+          mtime INTEGER,
+          status TEXT,
+          finalScore INTEGER
         )
       `).run();
 
@@ -264,7 +366,18 @@ class DatabaseService {
           autoQuarantine: Boolean(row.autoQuarantine),
           notifications: Boolean(row.notifications),
           startWithWindows: Boolean(row.startWithWindows),
-          virusTotalApiKey: row.virusTotalApiKey || ''
+          virusTotalApiKey: row.virusTotalApiKey || '',
+          minimizeToTray: Boolean(row.minimizeToTray ?? 1),
+          autoUpdates: Boolean(row.autoUpdates ?? 1),
+          aiDetection: Boolean(row.aiDetection ?? 1),
+          ransomwareShield: Boolean(row.ransomwareShield ?? 1),
+          usbProtection: Boolean(row.usbProtection ?? 1),
+          networkMonitoring: Boolean(row.networkMonitoring ?? 1),
+          desktopNotifications: Boolean(row.desktopNotifications ?? 1),
+          emailAlerts: Boolean(row.emailAlerts ?? 0),
+          shareIntel: Boolean(row.shareIntel ?? 1),
+          cloudAi: Boolean(row.cloudAi ?? 1),
+          firstTimeUser: Boolean(row.firstTimeUser ?? 1)
         };
       }
       return defaultSettings;
@@ -290,6 +403,102 @@ class DatabaseService {
     } catch (error) {
       console.error('[Database] Failed to update settings:', error);
       return this.getSettings();
+    }
+  }
+
+  // Scans History
+  public getScans(): ScanReport[] {
+    try {
+      const rows = this.db.prepare('SELECT * FROM scans ORDER BY date DESC').all() as any[];
+      return rows.map(r => ({
+        id: r.id,
+        date: r.date,
+        scanType: r.scanType,
+        duration: Number(r.duration),
+        filesScanned: Number(r.filesScanned),
+        filesSkipped: Number(r.filesSkipped),
+        threatsFound: Number(r.threatsFound),
+        threatsRemoved: Number(r.threatsRemoved),
+        securityScore: Number(r.securityScore),
+        cpuUsage: Number(r.cpuUsage),
+        detailsJson: r.detailsJson
+      }));
+    } catch (error) {
+      console.error('[Database] Failed to get scan logs:', error);
+      return [];
+    }
+  }
+
+  public addScan(scan: Omit<ScanReport, 'id' | 'date'>): ScanReport {
+    try {
+      const id = `scan_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      const date = new Date().toISOString();
+      
+      const stmt = this.db.prepare(`
+        INSERT INTO scans (id, date, scanType, duration, filesScanned, filesSkipped, threatsFound, threatsRemoved, securityScore, cpuUsage, detailsJson)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      
+      stmt.run(
+        id,
+        date,
+        scan.scanType,
+        scan.duration,
+        scan.filesScanned,
+        scan.filesSkipped,
+        scan.threatsFound,
+        scan.threatsRemoved,
+        scan.securityScore,
+        scan.cpuUsage,
+        scan.detailsJson
+      );
+
+      return {
+        ...scan,
+        id,
+        date
+      };
+    } catch (error) {
+      console.error('[Database] Failed to save scan report:', error);
+      throw error;
+    }
+  }
+
+  // Hash Cache
+  public getFileCache(filePath: string): FileCacheEntry | null {
+    try {
+      const row = this.db.prepare('SELECT * FROM file_cache WHERE filePath = ?').get(filePath) as any;
+      if (row) {
+        return {
+          filePath: row.filePath,
+          hash: row.hash,
+          mtime: Number(row.mtime),
+          status: row.status as any,
+          finalScore: Number(row.finalScore)
+        };
+      }
+      return null;
+    } catch (error) {
+      console.error('[Database] Failed to fetch file cache:', error);
+      return null;
+    }
+  }
+
+  public setFileCache(entry: FileCacheEntry): void {
+    try {
+      const stmt = this.db.prepare(`
+        INSERT OR REPLACE INTO file_cache (filePath, hash, mtime, status, finalScore)
+        VALUES (?, ?, ?, ?, ?)
+      `);
+      stmt.run(
+        entry.filePath,
+        entry.hash,
+        entry.mtime,
+        entry.status,
+        entry.finalScore
+      );
+    } catch (error) {
+      console.error('[Database] Failed to set file cache:', error);
     }
   }
 }

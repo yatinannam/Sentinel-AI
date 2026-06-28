@@ -55,11 +55,13 @@
       "icon": "assets/icon.png"
     },
     "nsis": {
-      "oneClick": false,
-      "allowToChangeInstallationDirectory": true,
+      "oneClick": true,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": false,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "SentinelAI"
+      "shortcutName": "SentinelAI",
+      "runAfterFinish": true
     }
   },
   "allowScripts": {

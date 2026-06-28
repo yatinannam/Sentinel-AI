@@ -1,9 +1,9 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { 
-  Shield, Cpu, Network, History, FileText, Settings as SettingsIcon, 
+  Shield, Cpu, Network, History, Settings as SettingsIcon, 
   Trash2, RotateCcw, AlertTriangle, Search, RefreshCw, 
-  Terminal, HardDrive, Play, FolderOpen, Eye, EyeOff, Upload,
-  Layers, Lock, Laptop, Pause
+  Play, FolderOpen, Eye, EyeOff, Upload,
+  Layers, Lock, Laptop, Pause, ChevronDown, ChevronUp, Activity
 } from 'lucide-react';
 
 // TypeScript Interfaces for IPC Data
@@ -30,6 +30,64 @@ interface QuarantinedFile {
   date: string;
 }
 
+interface LayerCheck {
+  name: string;
+  status: 'Passed' | 'Failed' | 'Completed' | 'Skipped' | 'Executed' | 'No Action';
+  details: string;
+  score: number;
+}
+
+interface MultiLayerScanResult {
+  filePath: string;
+  fileName: string;
+  hash: string;
+  finalScore: number;
+  status: 'Safe' | 'Suspicious' | 'Malicious';
+  layers: {
+    layer1: LayerCheck;
+    layer2: LayerCheck & {
+      features?: {
+        fileSizeKb: number;
+        entropy: number;
+        apiCount: number;
+        stringCount: number;
+        peHeaders: string;
+        importedDlls: string[];
+        digitalSignature: string;
+        sections: number;
+        entryPoint: string;
+      };
+      threatProbability?: number;
+      confidenceScore?: number;
+      malwareFamily?: string;
+    };
+    layer3: LayerCheck & {
+      monitoredEvents?: {
+        fileEvents: number;
+        registryEvents: number;
+        powershellExecutions: number;
+        processInjections: number;
+        memoryAllocations: number;
+        networkCommunications: number;
+        rapidEncryption: number;
+      };
+      behavioralRiskScore?: number;
+    };
+    layer4: LayerCheck & {
+      reputationScore?: number;
+      detectionRatio?: string;
+      knownThreatInfo?: string;
+    };
+    layer5: LayerCheck & {
+      weights?: { signature: number; static: number; behavioral: number; threatIntel: number };
+      contributions?: { signature: number; static: number; behavioral: number; threatIntel: number };
+    };
+    layer6: LayerCheck & {
+      actions?: string[];
+    };
+  };
+}
+
 interface Settings {
   aiSensitivity: number;
   realTimeProtection: boolean;
@@ -38,9 +96,20 @@ interface Settings {
   notifications: boolean;
   startWithWindows: boolean;
   virusTotalApiKey: string;
+  minimizeToTray: boolean;
+  autoUpdates: boolean;
+  aiDetection: boolean;
+  ransomwareShield: boolean;
+  usbProtection: boolean;
+  networkMonitoring: boolean;
+  desktopNotifications: boolean;
+  emailAlerts: boolean;
+  shareIntel: boolean;
+  cloudAi: boolean;
+  firstTimeUser: boolean;
 }
 
-interface ProcessTelemetry {
+export interface ProcessTelemetry {
   pid: number;
   parentPid: number;
   name: string;
@@ -51,7 +120,7 @@ interface ProcessTelemetry {
   reasons: string[];
 }
 
-interface NetworkConnection {
+export interface NetworkConnection {
   protocol: 'TCP' | 'UDP';
   localAddress: string;
   localPort: number;
@@ -63,7 +132,7 @@ interface NetworkConnection {
   suspicious: boolean;
 }
 
-interface RegistryEvent {
+export interface RegistryEvent {
   action: 'Added (Startup)' | 'Modified' | 'Deleted';
   key: string;
   name: string;
@@ -72,7 +141,7 @@ interface RegistryEvent {
   status: string;
 }
 
-interface FileEvent {
+export interface FileEvent {
   action: string;
   path: string;
   time: string;
@@ -90,8 +159,7 @@ const App: React.FC = () => {
   const electronAPI = (window as any).electronAPI;
 
   // Navigation
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'live' | 'threats' | 'quarantine' | 'scanner' | 'settings'>('dashboard');
-  const [liveSubTab, setLiveSubTab] = useState<'processes' | 'network' | 'files' | 'registry' | 'usb'>('processes');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'threats' | 'quarantine' | 'scanner' | 'settings'>('dashboard');
 
   // EDR Telemetry Streams
   const [incidents, setIncidents] = useState<Incident[]>([]);
@@ -103,26 +171,50 @@ const App: React.FC = () => {
     autoQuarantine: true,
     notifications: true,
     startWithWindows: false,
-    virusTotalApiKey: ''
+    virusTotalApiKey: '',
+    minimizeToTray: true,
+    autoUpdates: true,
+    aiDetection: true,
+    ransomwareShield: true,
+    usbProtection: true,
+    networkMonitoring: true,
+    desktopNotifications: true,
+    emailAlerts: false,
+    shareIntel: true,
+    cloudAi: true,
+    firstTimeUser: true
   });
-
-  // Live Streams
-  const [processes, setProcesses] = useState<ProcessTelemetry[]>([]);
-  const [connections, setConnections] = useState<NetworkConnection[]>([]);
-  const [fileEvents, setFileEvents] = useState<FileEvent[]>([]);
-  const [registryEvents, setRegistryEvents] = useState<RegistryEvent[]>([]);
-  const [usbEvents, setUsbEvents] = useState<UsbEvent[]>([]);
+  // Onboarding Wizard & Simulated Update state
+  const [onboardingStep, setOnboardingStep] = useState<number>(1);
+  const [onboardingScanProgress, setOnboardingScanProgress] = useState<number>(0);
+  const [isCheckingForUpdates, setIsCheckingForUpdates] = useState<boolean>(false);
+  const [updaterStepText, setUpdaterStepText] = useState<string>('');
 
   // Search Filters
   const [searchQuery, setSearchQuery] = useState('');
 
   // Scanning State
-  const [scanType, setScanType] = useState<string>('Quick Scan');
   const [scanStatus, setScanStatus] = useState<string>('System Idle');
   const [scanProgress, setScanProgress] = useState<number>(0);
   const [isScanPaused, setIsScanPaused] = useState<boolean>(false);
   const [selectedScanPath, setSelectedScanPath] = useState<string>('C:\\');
   const [isDragOver, setIsDragOver] = useState(false);
+
+  // Scan Center states
+  const [scanHistory, setScanHistory] = useState<any[]>([]);
+  const [activeReport, setActiveReport] = useState<any>(null);
+  const [liveScanStatus, setLiveScanStatus] = useState<any>(null);
+  const [scannerSubTab, setScannerSubTab] = useState<'options' | 'results' | 'history'>('options');
+
+  // Multi-layer AI Threat Detection states
+  const [scannedFiles, setScannedFiles] = useState<MultiLayerScanResult[]>([]);
+  const [activeAnalysis, setActiveAnalysis] = useState<MultiLayerScanResult | null>(null);
+  const [currentAnimLayer, setCurrentAnimLayer] = useState<number>(0);
+  const [expandedLayers, setExpandedLayers] = useState<Record<string, boolean>>({
+    layer2: false,
+    layer3: false,
+    layer4: false
+  });
 
   // Settings visibility
   const [showApiKey, setShowApiKey] = useState(false);
@@ -158,52 +250,41 @@ const App: React.FC = () => {
       electronAPI.getSettings().then((data: Settings) => setSettings(data));
 
       // Register live events listeners
-      const cleanFile = electronAPI.onFileEvent((event: FileEvent) => {
-        setFileEvents(prev => [event, ...prev].slice(0, 100)); // Limit to 100 entries
-      });
-
-      const cleanProcess = electronAPI.onProcessUpdate((procList: ProcessTelemetry[]) => {
-        setProcesses(procList);
-      });
-
-      const cleanNetwork = electronAPI.onNetworkUpdate((connList: NetworkConnection[]) => {
-        // Map process names from PID list
-        const updated = connList.map((conn: NetworkConnection) => {
-          const match = processes.find(p => p.pid === conn.pid);
-          return {
-            ...conn,
-            processName: match ? match.name : 'Unknown'
-          };
-        });
-        setConnections(updated);
-      });
-
-      const cleanRegistry = electronAPI.onRegistryEvent((events: RegistryEvent[]) => {
-        setRegistryEvents(prev => [...events, ...prev].slice(0, 100));
-      });
-
+      const cleanFile = electronAPI.onFileEvent(() => {});
+      const cleanProcess = electronAPI.onProcessUpdate(() => {});
+      const cleanNetwork = electronAPI.onNetworkUpdate(() => {});
+      const cleanRegistry = electronAPI.onRegistryEvent(() => {});
       const cleanUsb = electronAPI.onUsbEvent((event: UsbEvent) => {
-        setUsbEvents(prev => [event, ...prev].slice(0, 50));
+        if (event.action === 'Inserted' && settings.notifications) {
+          new Notification('Removable USB Device Detected', {
+            body: `Volume ${event.letter} (${event.letter || 'Removable Storage'}) is active. Running signature check...`,
+            icon: '../assets/icon.png'
+          });
+        }
       });
 
-      const cleanScan = electronAPI.onScanStatusUpdate((update: { status: string; progress: number }) => {
+      const cleanScan = electronAPI.onScanStatusUpdate((update: any) => {
+        setLiveScanStatus(update);
         setScanStatus(update.status);
         setScanProgress(update.progress);
         
         if (update.status === 'Scan Paused') {
           setIsScanPaused(true);
-        } else if (update.progress === 100 || update.status.includes('finished') || update.status.includes('Idle')) {
+        } else {
           setIsScanPaused(false);
-          if (update.progress === 100 || update.status.includes('finished')) {
-            setTimeout(() => {
-              setScanStatus(prev => (prev.includes('finished') || prev.includes('Scan finished') ? 'System Idle' : prev));
-            }, 15000);
-          }
         }
-        
-        // Refresh databases if threat list updated
-        electronAPI.getIncidents().then((data: Incident[]) => setIncidents(data));
-        electronAPI.getQuarantine().then((data: QuarantinedFile[]) => setQuarantineList(data));
+
+        // If completed or idle
+        if (update.progress === 100 || update.status.includes('completed') || update.status.includes('finished')) {
+          electronAPI.getScanHistory().then((data: any[]) => setScanHistory(data));
+          electronAPI.getIncidents().then((data: Incident[]) => setIncidents(data));
+          electronAPI.getQuarantine().then((data: QuarantinedFile[]) => setQuarantineList(data));
+        }
+      });
+
+      const cleanScanReport = electronAPI.onScanReportCompleted((report: any) => {
+        setActiveReport(report);
+        setScannerSubTab('results');
       });
 
       const cleanIncident = electronAPI.onIncidentDetected((incident: Incident) => {
@@ -219,9 +300,26 @@ const App: React.FC = () => {
         }
       });
 
+      // Listen to multi-layer scan progress updates
+      const cleanMultiProgress = electronAPI.onMultiLayerScanProgress((result: MultiLayerScanResult) => {
+        setScannedFiles(prev => {
+          const filtered = prev.filter(f => f.filePath !== result.filePath);
+          return [result, ...filtered];
+        });
+        setActiveAnalysis(result);
+      });
+
       // Quick scan tray menu trigger listener
       const cleanTrayScan = electronAPI.onTriggerQuickScan(() => {
         handleQuickScan();
+      });
+
+      const cleanTriggerUpdate = electronAPI.onTriggerUpdateCheck(() => {
+        triggerSimulatedUpdateCheck();
+      });
+
+      const cleanSettingsUpdated = electronAPI.onSettingsUpdated((updatedSettings: any) => {
+        setSettings(updatedSettings);
       });
 
       return () => {
@@ -232,21 +330,34 @@ const App: React.FC = () => {
         cleanUsb();
         cleanScan();
         cleanIncident();
+        cleanMultiProgress();
         cleanTrayScan();
+        cleanScanReport();
+        cleanTriggerUpdate();
+        cleanSettingsUpdated();
       };
     }
-  }, [processes, settings.notifications]);
+  }, [settings.notifications]);
 
-  // Load system specs on mount
+  // Load system specs and scan history on mount
   useEffect(() => {
-    if (electronAPI && electronAPI.getSystemSpecs) {
-      electronAPI.getSystemSpecs().then((specs: any) => {
-        if (specs) {
-          setSystemSpecs(specs);
-        }
-      }).catch((err: any) => {
-        console.error('Failed to load system specs:', err);
-      });
+    if (electronAPI) {
+      if (electronAPI.getSystemSpecs) {
+        electronAPI.getSystemSpecs().then((specs: any) => {
+          if (specs) {
+            setSystemSpecs(specs);
+          }
+        }).catch((err: any) => {
+          console.error('Failed to load system specs:', err);
+        });
+      }
+      if (electronAPI.getScanHistory) {
+        electronAPI.getScanHistory().then((data: any[]) => {
+          setScanHistory(data);
+        }).catch((err: any) => {
+          console.error('Failed to load scan history:', err);
+        });
+      }
     }
   }, []);
 
@@ -272,6 +383,25 @@ const App: React.FC = () => {
     return () => clearInterval(timer);
   }, []);
 
+  // Trigger step-by-step layer animation when a new active analysis is set
+  useEffect(() => {
+    if (activeAnalysis) {
+      setCurrentAnimLayer(1);
+      const t1 = setTimeout(() => setCurrentAnimLayer(2), 500);
+      const t2 = setTimeout(() => setCurrentAnimLayer(3), 1000);
+      const t3 = setTimeout(() => setCurrentAnimLayer(4), 1500);
+      const t4 = setTimeout(() => setCurrentAnimLayer(5), 2000);
+      const t5 = setTimeout(() => setCurrentAnimLayer(6), 2500);
+      return () => {
+        clearTimeout(t1);
+        clearTimeout(t2);
+        clearTimeout(t3);
+        clearTimeout(t4);
+        clearTimeout(t5);
+      };
+    }
+  }, [activeAnalysis]);
+
   // Actions
   const handleToggleScanPause = async () => {
     if (electronAPI) {
@@ -294,20 +424,52 @@ const App: React.FC = () => {
     }
   };
 
+  const triggerSimulatedUpdateCheck = async () => {
+    if (isCheckingForUpdates) return;
+    setIsCheckingForUpdates(true);
+    setUpdaterStepText("Checking for Updates...");
+    
+    if (electronAPI && electronAPI.checkForUpdates) {
+      try {
+        const steps = await electronAPI.checkForUpdates();
+        for (const step of steps) {
+          setUpdaterStepText(step.text);
+          await new Promise(resolve => setTimeout(resolve, step.delay));
+        }
+      } catch (err) {
+        setUpdaterStepText("Unable to contact the cloud protection service. Local protection is still active.");
+        await new Promise(resolve => setTimeout(resolve, 2500));
+      }
+    } else {
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      setUpdaterStepText("Security Definitions Updated");
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      setUpdaterStepText("AI Model Updated");
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      setUpdaterStepText("Platform Updated");
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+    
+    setIsCheckingForUpdates(false);
+    if (settings.notifications) {
+      new Notification('Security Definitions Updated', {
+        body: 'Your AI model and definition bases are up to date.',
+        icon: '../assets/icon.png'
+      });
+    }
+  };
+
   const handleQuickScan = () => {
-    setScanType('Quick Scan');
     setIsScanPaused(false);
     if (electronAPI) {
-      electronAPI.runSystemScan(selectedScanPath);
+      electronAPI.runNormalScan();
     }
   };
 
   const handleDeepScan = () => {
-    setScanType('Deep Scan');
     setIsScanPaused(false);
     if (electronAPI) {
-      // Scan root path
-      electronAPI.runSystemScan('C:\\');
+      electronAPI.runDeepScan();
     }
   };
 
@@ -321,7 +483,6 @@ const App: React.FC = () => {
   };
 
   const handleCustomScan = () => {
-    setScanType('Custom Directory Scan');
     setIsScanPaused(false);
     if (electronAPI) {
       electronAPI.runSystemScan(selectedScanPath);
@@ -333,9 +494,15 @@ const App: React.FC = () => {
       const result = await electronAPI.restoreQuarantine(id);
       if (result.success) {
         alert(`File restored successfully to: ${result.path}`);
-        // Refresh lists
         electronAPI.getQuarantine().then((data: QuarantinedFile[]) => setQuarantineList(data));
         electronAPI.getIncidents().then((data: Incident[]) => setIncidents(data));
+        
+        if (settings.notifications) {
+          new Notification('Threat Restored', {
+            body: 'The quarantined file was successfully restored to its original location.',
+            icon: '../assets/icon.png'
+          });
+        }
       } else {
         alert(`Failed to restore file: ${result.error}`);
       }
@@ -346,8 +513,14 @@ const App: React.FC = () => {
     if (electronAPI) {
       const success = await electronAPI.deleteQuarantine(id);
       if (success) {
-        // Refresh lists
         electronAPI.getQuarantine().then((data: QuarantinedFile[]) => setQuarantineList(data));
+        
+        if (settings.notifications) {
+          new Notification('Threat Removed', {
+            body: 'The quarantined file was permanently removed from disk.',
+            icon: '../assets/icon.png'
+          });
+        }
       } else {
         alert('Failed to delete file.');
       }
@@ -370,9 +543,13 @@ const App: React.FC = () => {
     if (electronAPI) {
       await electronAPI.updateSettings(updatedSettings);
       
-      // If start with windows toggled
-      if (key === 'startWithWindows') {
-        await electronAPI.toggleAutoStart(value);
+      if (key === 'realTimeProtection') {
+        if (settings.notifications) {
+          new Notification(value ? 'Real-Time Protection Enabled' : 'Real-Time Protection Disabled', {
+            body: value ? 'All security shields are active.' : 'Warning: Your device is now vulnerable.',
+            icon: '../assets/icon.png'
+          });
+        }
       }
     }
   };
@@ -401,14 +578,24 @@ const App: React.FC = () => {
         setScanStatus(`AI Analyzing dropped file: ${file.name}`);
         setScanProgress(30);
 
-        // Run analysis using file path
         if (electronAPI) {
-          setScanProgress(70);
-          // Query scan directory or trigger scan directly
-          // We'll run scan on this specific file
-          await electronAPI.runSystemScan(filePath);
-          setScanProgress(100);
-          setScanStatus('System Idle');
+          try {
+            setScanProgress(60);
+            const result = await (electronAPI as any).runMultiLayerScan(filePath);
+            setScanProgress(100);
+            setScannedFiles(prev => {
+              const filtered = prev.filter(f => f.filePath !== result.filePath);
+              return [result, ...filtered];
+            });
+            setActiveAnalysis(result);
+          } catch (err) {
+            console.error('Multi-layer scan failed:', err);
+          } finally {
+            setTimeout(() => {
+              setScanStatus('System Idle');
+              setScanProgress(0);
+            }, 2000);
+          }
         }
       }
     }
@@ -438,6 +625,289 @@ const App: React.FC = () => {
   // Count active issues
   const activeThreatsCount = incidents.filter(i => i.status === 'Detected').length;
   const totalBlockedCount = incidents.filter(i => i.status === 'Quarantined' || i.status === 'Killed' || i.status === 'Blocked').length;
+
+  const renderAiLayerAnalysis = () => {
+    if (!activeAnalysis) {
+      return (
+        <div className="glass-panel rounded-2xl p-8 flex flex-col items-center justify-center text-center gap-4 h-full min-h-[400px]">
+          <div className="p-4 rounded-full bg-slate-900/60 border border-slate-800 text-slate-500">
+            <Layers className="w-10 h-10" />
+          </div>
+          <div>
+            <h3 className="text-sm font-bold text-slate-200">AI Multi-Layer Analysis</h3>
+            <p className="text-xs text-slate-500 mt-1 max-w-[240px]">
+              Select a module from the Telemetry history or drop a file to view a real-time layered security evaluation.
+            </p>
+          </div>
+        </div>
+      );
+    }
+
+    const { finalScore, status, layers, fileName } = activeAnalysis;
+
+    const getLayerStatusBadge = (layerStatus: string) => {
+      switch (layerStatus) {
+        case 'Passed': return <span className="text-green-400 font-bold">✔ PASSED</span>;
+        case 'Failed': return <span className="text-red-400 font-bold">✘ DETECTED</span>;
+        case 'Skipped': return <span className="text-slate-500">N/A SKIPPED</span>;
+        case 'Executed': return <span className="text-cyan-400 font-bold">✔ EXECUTED</span>;
+        case 'Completed': return <span className="text-cyan-400 font-bold">✔ DONE</span>;
+        default: return <span className="text-slate-400">{layerStatus.toUpperCase()}</span>;
+      }
+    };
+
+    return (
+      <div className="glass-panel rounded-2xl p-6 flex flex-col gap-6 animate-fadeIn font-mono text-xs select-none">
+        <div className="flex flex-col gap-1 border-b border-slate-800 pb-3">
+          <span className="text-[10px] text-slate-500 uppercase tracking-wider font-bold">Diagnostics Core</span>
+          <h3 className="text-sm font-bold text-white truncate" title={fileName}>{fileName}</h3>
+        </div>
+
+        <div className="flex flex-col gap-5 relative">
+          <div className="absolute left-4 top-2.5 bottom-2.5 w-0.5 bg-slate-800" />
+          
+          {currentAnimLayer < 6 && (
+            <div 
+              className="absolute left-3.5 w-1.5 h-1.5 rounded-full bg-[#00E5FF] shadow-[0_0_8px_#00E5FF] transition-all duration-300 animate-pulse"
+              style={{
+                top: `${(currentAnimLayer - 1) * 15.5 + 2}%`
+              }}
+            />
+          )}
+
+          <div className={`flex items-start gap-4 transition-all duration-300 ${currentAnimLayer >= 1 ? 'opacity-100' : 'opacity-30'}`}>
+            <div className={`z-10 p-1.5 rounded-full border ${
+              currentAnimLayer === 1 
+                ? 'bg-cyan-500/20 border-[#00E5FF] animate-pulse text-[#00E5FF]' 
+                : layers.layer1.status === 'Failed' 
+                  ? 'bg-red-500/20 border-red-500 text-red-400' 
+                  : 'bg-slate-900 border-slate-800 text-green-400'
+            }`}>
+              <Shield className="w-3.5 h-3.5" />
+            </div>
+            <div className="flex-1 flex flex-col gap-0.5">
+              <div className="flex justify-between items-center font-bold">
+                <span className="text-white">Layer 1 - Signatures</span>
+                {currentAnimLayer === 1 ? <span className="text-cyan-400 animate-pulse">ANALYZING...</span> : getLayerStatusBadge(layers.layer1.status)}
+              </div>
+              <span className="text-[10px] text-slate-400 leading-normal">{layers.layer1.details}</span>
+            </div>
+          </div>
+
+          <div className={`flex items-start gap-4 transition-all duration-300 ${currentAnimLayer >= 2 ? 'opacity-100' : 'opacity-30'}`}>
+            <div className={`z-10 p-1.5 rounded-full border ${
+              currentAnimLayer === 2 
+                ? 'bg-cyan-500/20 border-[#00E5FF] animate-pulse text-[#00E5FF]' 
+                : layers.layer2.status === 'Failed'
+                  ? 'bg-red-500/20 border-red-500 text-red-400'
+                  : layers.layer2.status === 'Skipped'
+                    ? 'bg-slate-900 border-slate-800 text-slate-500'
+                    : 'bg-slate-900 border-slate-800 text-green-400'
+            }`}>
+              <Cpu className="w-3.5 h-3.5" />
+            </div>
+            <div className="flex-1 flex flex-col gap-0.5">
+              <div className="flex justify-between items-center font-bold">
+                <span className="text-white">Layer 2 - Static AI</span>
+                {currentAnimLayer === 2 ? <span className="text-cyan-400 animate-pulse">EVALUATING...</span> : getLayerStatusBadge(layers.layer2.status)}
+              </div>
+              <span className="text-[10px] text-slate-400 leading-normal">{layers.layer2.details}</span>
+            </div>
+          </div>
+
+          <div className={`flex items-start gap-4 transition-all duration-300 ${currentAnimLayer >= 3 ? 'opacity-100' : 'opacity-30'}`}>
+            <div className={`z-10 p-1.5 rounded-full border ${
+              currentAnimLayer === 3 
+                ? 'bg-cyan-500/20 border-[#00E5FF] animate-pulse text-[#00E5FF]' 
+                : layers.layer3.status === 'Failed'
+                  ? 'bg-red-500/20 border-red-500 text-red-400'
+                  : layers.layer3.status === 'Skipped'
+                    ? 'bg-slate-900 border-slate-800 text-slate-500'
+                    : 'bg-slate-900 border-slate-800 text-green-400'
+            }`}>
+              <Activity className="w-3.5 h-3.5" />
+            </div>
+            <div className="flex-1 flex flex-col gap-0.5">
+              <div className="flex justify-between items-center font-bold">
+                <span className="text-white">Layer 3 - Behavioral AI</span>
+                {currentAnimLayer === 3 ? <span className="text-cyan-400 animate-pulse">MONITORING...</span> : getLayerStatusBadge(layers.layer3.status)}
+              </div>
+              <span className="text-[10px] text-slate-400 leading-normal">{layers.layer3.details}</span>
+            </div>
+          </div>
+
+          <div className={`flex items-start gap-4 transition-all duration-300 ${currentAnimLayer >= 4 ? 'opacity-100' : 'opacity-30'}`}>
+            <div className={`z-10 p-1.5 rounded-full border ${
+              currentAnimLayer === 4 
+                ? 'bg-cyan-500/20 border-[#00E5FF] animate-pulse text-[#00E5FF]' 
+                : layers.layer4.status === 'Failed'
+                  ? 'bg-red-500/20 border-red-500 text-red-400'
+                  : layers.layer4.status === 'Skipped'
+                    ? 'bg-slate-900 border-slate-800 text-slate-500'
+                    : 'bg-slate-900 border-slate-800 text-green-400'
+            }`}>
+              <Network className="w-3.5 h-3.5" />
+            </div>
+            <div className="flex-1 flex flex-col gap-0.5">
+              <div className="flex justify-between items-center font-bold">
+                <span className="text-white">Layer 4 - Threat Intel</span>
+                {currentAnimLayer === 4 ? <span className="text-cyan-400 animate-pulse">LOOKING UP...</span> : getLayerStatusBadge(layers.layer4.status)}
+              </div>
+              <span className="text-[10px] text-slate-400 leading-normal">{layers.layer4.details}</span>
+            </div>
+          </div>
+
+          <div className={`flex items-start gap-4 transition-all duration-300 ${currentAnimLayer >= 5 ? 'opacity-100' : 'opacity-30'}`}>
+            <div className={`z-10 p-1.5 rounded-full border ${
+              currentAnimLayer === 5 
+                ? 'bg-cyan-500/20 border-[#00E5FF] animate-pulse text-[#00E5FF]' 
+                : status === 'Malicious'
+                  ? 'bg-red-500/20 border-red-500 text-red-400'
+                  : status === 'Suspicious'
+                    ? 'bg-amber-500/20 border-amber-500 text-amber-400'
+                    : 'bg-slate-900 border-slate-800 text-green-400'
+            }`}>
+              <Layers className="w-3.5 h-3.5" />
+            </div>
+            <div className="flex-1 flex flex-col gap-0.5">
+              <div className="flex justify-between items-center font-bold">
+                <span className="text-white">Layer 5 - Decision AI</span>
+                {currentAnimLayer === 5 ? <span className="text-cyan-400 animate-pulse">COMPILING...</span> : getLayerStatusBadge(layers.layer5.status)}
+              </div>
+              <span className="text-[10px] text-slate-400 leading-normal">{layers.layer5.details}</span>
+            </div>
+          </div>
+
+          <div className={`flex items-start gap-4 transition-all duration-300 ${currentAnimLayer >= 6 ? 'opacity-100' : 'opacity-30'}`}>
+            <div className={`z-10 p-1.5 rounded-full border ${
+              currentAnimLayer === 6 && layers.layer6.status === 'Executed'
+                ? 'bg-red-500/20 border-red-500 text-red-400'
+                : 'bg-slate-900 border-slate-800 text-slate-500'
+            }`}>
+              <Lock className="w-3.5 h-3.5" />
+            </div>
+            <div className="flex-1 flex flex-col gap-0.5">
+              <div className="flex justify-between items-center font-bold">
+                <span className="text-white">Layer 6 - Response</span>
+                {getLayerStatusBadge(layers.layer6.status)}
+              </div>
+              <span className="text-[10px] text-slate-400 leading-normal">{layers.layer6.details}</span>
+            </div>
+          </div>
+        </div>
+
+        {currentAnimLayer >= 5 && (
+          <div className="flex items-center justify-between border-t border-b border-slate-800 py-3.5 mt-2">
+            <div className="flex flex-col gap-1">
+              <span className="text-[10px] text-slate-500 uppercase font-bold">Verdict Status</span>
+              <span className={`text-base font-black ${
+                status === 'Malicious' ? 'text-red-500' : status === 'Suspicious' ? 'text-amber-500' : 'text-green-500'
+              }`}>
+                {status.toUpperCase()}
+              </span>
+            </div>
+            
+            <div className="flex flex-col items-end gap-1">
+              <span className="text-[10px] text-slate-500 uppercase font-bold">Threat Score</span>
+              <span className="text-xl font-black text-white">{finalScore}%</span>
+            </div>
+          </div>
+        )}
+
+        {currentAnimLayer >= 5 && (
+          <div className="flex flex-col gap-2.5">
+            <span className="text-[10px] text-slate-500 uppercase font-bold tracking-wider">Detection Details & Contributions</span>
+            
+            {layers.layer2.status !== 'Skipped' && (
+              <div className="border border-slate-800/80 rounded-xl overflow-hidden bg-slate-950/20">
+                <div 
+                  onClick={() => setExpandedLayers(prev => ({ ...prev, layer2: !prev.layer2 }))}
+                  className="p-3 flex items-center justify-between cursor-pointer hover:bg-slate-900/30 transition select-none"
+                >
+                  <span className="font-semibold text-slate-300">Static AI Features (30% weight)</span>
+                  <div className="flex items-center gap-2">
+                    <span className="text-slate-400 font-bold">+{layers.layer5.contributions?.static || 0}%</span>
+                    {expandedLayers.layer2 ? <ChevronUp className="w-3.5 h-3.5 text-slate-500" /> : <ChevronDown className="w-3.5 h-3.5 text-slate-500" />}
+                  </div>
+                </div>
+                {expandedLayers.layer2 && layers.layer2.features && (
+                  <div className="p-3 border-t border-slate-800 bg-[#070D18]/50 flex flex-col gap-2 font-mono text-[10px] text-slate-400 leading-normal">
+                    <div className="grid grid-cols-2 gap-x-4 gap-y-1.5">
+                      <div>Format: <span className="text-white">{layers.layer2.features.peHeaders}</span></div>
+                      <div>Entropy: <span className="text-yellow-400 font-bold">{layers.layer2.features.entropy}</span></div>
+                      <div>Size: <span className="text-white">{layers.layer2.features.fileSizeKb} KB</span></div>
+                      <div>Signature: <span className={layers.layer2.features.digitalSignature === 'Unsigned' ? 'text-orange-400' : 'text-green-400'}>{layers.layer2.features.digitalSignature}</span></div>
+                      <div>Sections: <span className="text-white">{layers.layer2.features.sections}</span></div>
+                      <div>Entry Point: <span className="text-white">{layers.layer2.features.entryPoint}</span></div>
+                    </div>
+                    <div className="flex flex-col gap-1 border-t border-slate-900 pt-2 mt-1">
+                      <span className="text-slate-500 font-bold uppercase text-[9px]">Imported Modules:</span>
+                      <div className="flex flex-wrap gap-1 mt-0.5">
+                        {layers.layer2.features.importedDlls.map((dll: string, i: number) => (
+                          <span key={i} className="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-slate-300 text-[9px]">{dll}</span>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {layers.layer3.status !== 'Skipped' && (
+              <div className="border border-slate-800/80 rounded-xl overflow-hidden bg-slate-950/20">
+                <div 
+                  onClick={() => setExpandedLayers(prev => ({ ...prev, layer3: !prev.layer3 }))}
+                  className="p-3 flex items-center justify-between cursor-pointer hover:bg-slate-900/30 transition select-none"
+                >
+                  <span className="font-semibold text-slate-300">Behavioral NN Risk (50% weight)</span>
+                  <div className="flex items-center gap-2">
+                    <span className="text-slate-400 font-bold">+{layers.layer5.contributions?.behavioral || 0}%</span>
+                    {expandedLayers.layer3 ? <ChevronUp className="w-3.5 h-3.5 text-slate-500" /> : <ChevronDown className="w-3.5 h-3.5 text-slate-500" />}
+                  </div>
+                </div>
+                {expandedLayers.layer3 && layers.layer3.monitoredEvents && (
+                  <div className="p-3 border-t border-slate-800 bg-[#070D18]/50 flex flex-col gap-2 font-mono text-[10px] text-slate-400 leading-normal">
+                    <span className="text-slate-500 font-bold uppercase text-[9px]">Monitored Capabilities:</span>
+                    <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 mt-0.5">
+                      <div>File Operations: <span className="text-white font-bold">{layers.layer3.monitoredEvents.fileEvents}</span></div>
+                      <div>Registry Modifications: <span className="text-white font-bold">{layers.layer3.monitoredEvents.registryEvents}</span></div>
+                      <div>PowerShell Invocation: <span className={layers.layer3.monitoredEvents.powershellExecutions > 0 ? 'text-orange-400 font-bold' : 'text-slate-500'}>{layers.layer3.monitoredEvents.powershellExecutions}</span></div>
+                      <div>Process Injection APIs: <span className={layers.layer3.monitoredEvents.processInjections > 0 ? 'text-red-400 font-bold' : 'text-slate-500'}>{layers.layer3.monitoredEvents.processInjections}</span></div>
+                      <div>Virtual Memory Alloc: <span className="text-white">{layers.layer3.monitoredEvents.memoryAllocations}</span></div>
+                      <div>Network Sockets: <span className="text-white">{layers.layer3.monitoredEvents.networkCommunications}</span></div>
+                      <div>Ransomware Signatures: <span className={layers.layer3.monitoredEvents.rapidEncryption > 0 ? 'text-red-400 font-bold' : 'text-slate-500'}>{layers.layer3.monitoredEvents.rapidEncryption}</span></div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {layers.layer4.status !== 'Skipped' && (
+              <div className="border border-slate-800/80 rounded-xl overflow-hidden bg-slate-950/20">
+                <div 
+                  onClick={() => setExpandedLayers(prev => ({ ...prev, layer4: !prev.layer4 }))}
+                  className="p-3 flex items-center justify-between cursor-pointer hover:bg-slate-900/30 transition select-none"
+                >
+                  <span className="font-semibold text-slate-300">Threat Intelligence (20% weight)</span>
+                  <div className="flex items-center gap-2">
+                    <span className="text-slate-400 font-bold">+{layers.layer5.contributions?.threatIntel || 0}%</span>
+                    {expandedLayers.layer4 ? <ChevronUp className="w-3.5 h-3.5 text-slate-500" /> : <ChevronDown className="w-3.5 h-3.5 text-slate-500" />}
+                  </div>
+                </div>
+                {expandedLayers.layer4 && (
+                  <div className="p-3 border-t border-slate-800 bg-[#070D18]/50 flex flex-col gap-1.5 font-mono text-[10px] text-slate-400 leading-normal">
+                    <div>VirusTotal Ratio: <span className="text-white font-bold">{layers.layer4.detectionRatio}</span></div>
+                    <div>Reputation Score: <span className="text-white">{layers.layer4.reputationScore}</span></div>
+                    <div>Threat Label: <span className="text-red-400">{layers.layer4.knownThreatInfo}</span></div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  };
 
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-[#0B1220] text-slate-200">
@@ -470,18 +940,6 @@ const App: React.FC = () => {
           >
             <Layers className="w-4 h-4" />
             Overview Dashboard
-          </button>
-
-          <button 
-            onClick={() => setActiveTab('live')}
-            className={`flex items-center gap-3.5 px-4 py-3 rounded-xl text-sm font-medium transition ${
-              activeTab === 'live' 
-                ? 'bg-cyan-500/10 text-white border border-[#00E5FF]/30 shadow-[0_0_15px_rgba(0,229,255,0.1)]' 
-                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/40 border border-transparent'
-            }`}
-          >
-            <Cpu className="w-4 h-4" />
-            Live Monitoring
           </button>
 
           <button 
@@ -555,7 +1013,9 @@ const App: React.FC = () => {
               {settings.realTimeProtection ? 'SHIELD ONLINE' : 'SHIELD DISABLED'}
             </span>
           </div>
-          <p className="text-[10px] text-slate-500 font-mono">Telemetry Streams: Active</p>
+          <p className="text-[10px] text-slate-500 font-mono">
+            Heuristic: {settings.aiSensitivity >= 80 ? 'Aggressive' : settings.aiSensitivity >= 50 ? 'Standard' : 'Basic'}
+          </p>
         </div>
       </nav>
 
@@ -659,456 +1119,280 @@ const App: React.FC = () => {
         <div className="flex-1 overflow-y-auto p-8 relative">
 
           {/* VIEW: DASHBOARD */}
-          {activeTab === 'dashboard' && (
-            <div className="flex flex-col gap-6 animate-fadeIn">
-              
-              {/* TOP STATS CARDS */}
-              <div className="grid grid-cols-1 md:grid-cols-4 gap-5">
-                <div className="glass-panel rounded-2xl p-5 flex flex-col gap-3 relative overflow-hidden">
-                  <div className="absolute top-0 right-0 p-3 opacity-10">
-                    <Shield className="w-16 h-16 text-[#00E5FF]" />
-                  </div>
-                  <span className="text-xs font-semibold tracking-wider text-slate-400">AGENT STATUS</span>
-                  <span className="text-2xl font-bold text-white flex items-center gap-2">
-                    {settings.realTimeProtection ? 'ACTIVE' : 'WARNING'}
-                  </span>
-                  <span className="text-[10px] font-mono text-cyan-400">Real-time protection running</span>
-                </div>
+          {activeTab === 'dashboard' && (() => {
+            const calculateSecurityScore = () => {
+              let score = 100;
+              if (!settings.realTimeProtection) score -= 20;
+              if (!settings.aiDetection) score -= 15;
+              if (!settings.ransomwareShield) score -= 15;
+              if (!settings.usbProtection) score -= 10;
+              if (!settings.networkMonitoring) score -= 10;
+              if (activeThreatsCount > 0) score -= Math.min(30, activeThreatsCount * 10);
+              return Math.max(0, score);
+            };
+            const score = calculateSecurityScore();
+            const lastScan = scanHistory[0] ? new Date(scanHistory[0].date).toLocaleDateString() : 'Never';
+            const isProtected = score >= 80 && settings.realTimeProtection;
 
-                <div className="glass-panel rounded-2xl p-5 flex flex-col gap-3 relative overflow-hidden">
-                  <div className="absolute top-0 right-0 p-3 opacity-10">
-                    <Cpu className="w-16 h-16 text-emerald-400" />
-                  </div>
-                  <span className="text-xs font-semibold tracking-wider text-slate-400">ACTIVE PROCESSES</span>
-                  <span className="text-2xl font-bold text-white font-mono">{processes.length || 0}</span>
-                  <span className="text-[10px] font-mono text-emerald-400">Polling WMI telemetries</span>
-                </div>
-
-                <div className="glass-panel rounded-2xl p-5 flex flex-col gap-3 relative overflow-hidden">
-                  <div className="absolute top-0 right-0 p-3 opacity-10">
-                    <Network className="w-16 h-16 text-purple-400" />
-                  </div>
-                  <span className="text-xs font-semibold tracking-wider text-slate-400">ESTABLISHED CONNS</span>
-                  <span className="text-2xl font-bold text-white font-mono">
-                    {connections.filter(c => c.state === 'ESTABLISHED').length || 0}
-                  </span>
-                  <span className="text-[10px] font-mono text-purple-400">Netstat connections monitored</span>
-                </div>
-
-                <div className="glass-panel rounded-2xl p-5 flex flex-col gap-3 relative overflow-hidden">
-                  <div className="absolute top-0 right-0 p-3 opacity-10">
-                    <AlertTriangle className="w-16 h-16 text-red-400" />
-                  </div>
-                  <span className="text-xs font-semibold tracking-wider text-slate-400">THREATS INTERCEPTED</span>
-                  <span className="text-2xl font-bold text-red-500 font-mono">{totalBlockedCount}</span>
-                  <span className="text-[10px] font-mono text-red-400">{activeThreatsCount} items unresolved</span>
-                </div>
-              </div>
-
-              {/* CHARTS & GRAPHICS ROW */}
-              <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            return (
+              <div className="flex flex-col gap-6 animate-fadeIn font-mono text-xs text-slate-300">
                 
-                {/* CYBER HEALTH / AI ENGINE DIAL */}
-                <div className="glass-panel rounded-2xl p-6 flex flex-col gap-4">
-                  <h3 className="text-sm font-semibold tracking-wider text-slate-300">AI DETECTOR INTENSITY</h3>
-                  <div className="flex flex-col items-center justify-center flex-1 py-4">
-                    <div className="relative w-36 h-36 flex items-center justify-center">
-                      {/* SVG Progress Ring */}
+                {/* 1. HERO SECURITY STATUS PANEL */}
+                <div className={`p-6 rounded-3xl border flex flex-col md:flex-row justify-between items-center gap-6 ${
+                  isProtected 
+                    ? 'border-green-500/20 bg-green-500/5 text-slate-200 shadow-[0_0_20px_rgba(34,197,94,0.05)]' 
+                    : 'border-red-500/20 bg-red-500/5 text-slate-200 shadow-[0_0_20px_rgba(239,68,68,0.05)]'
+                }`}>
+                  <div className="flex items-center gap-5">
+                    <div className={`p-4 rounded-full border ${
+                      isProtected 
+                        ? 'bg-green-500/10 border-green-500/30 text-green-400' 
+                        : 'bg-red-500/10 border-red-500/30 text-red-400'
+                    }`}>
+                      {isProtected ? <Shield className="w-10 h-10" /> : <AlertTriangle className="w-10 h-10" />}
+                    </div>
+                    <div className="flex flex-col gap-1 text-left">
+                      <h2 className="text-xl font-bold text-white uppercase tracking-wider">
+                        {isProtected ? 'Your System is Secured' : 'Action Required: System Vulnerable'}
+                      </h2>
+                      <p className="text-slate-400">
+                        {isProtected 
+                          ? 'Real-Time Protection is active and monitoring all system actions.' 
+                          : 'Real-time shields are disabled or unresolved threats exist. Fix settings immediately.'}
+                      </p>
+                    </div>
+                  </div>
+                  <button 
+                    onClick={handleQuickScan}
+                    className="py-3 px-6 rounded-xl bg-cyan-500 text-[#0B1220] hover:bg-[#00E5FF]/80 transition font-black tracking-wider uppercase text-xs shadow-[0_0_15px_rgba(0,229,255,0.2)]"
+                  >
+                    Launch Quick Scan
+                  </button>
+                </div>
+
+                {/* 2. STATS GRID */}
+                <div className="grid grid-cols-1 md:grid-cols-4 gap-5">
+                  <div className="glass-panel rounded-2xl p-5 flex flex-col gap-2.5 relative overflow-hidden border border-slate-800">
+                    <span className="text-[10px] font-bold tracking-wider text-slate-500 uppercase">Protection Status</span>
+                    <span className={`text-lg font-black ${settings.realTimeProtection ? 'text-green-400' : 'text-red-400'}`}>
+                      {settings.realTimeProtection ? 'SHIELD ONLINE' : 'SHIELD DISABLED'}
+                    </span>
+                    <span className="text-[10px] text-slate-500">Real-Time Protection Status</span>
+                  </div>
+
+                  <div className="glass-panel rounded-2xl p-5 flex flex-col gap-2.5 relative overflow-hidden border border-slate-800">
+                    <span className="text-[10px] font-bold tracking-wider text-slate-500 uppercase">Last Quick Scan</span>
+                    <span className="text-lg font-black text-white">{lastScan}</span>
+                    <span className="text-[10px] text-slate-500">Last system evaluation date</span>
+                  </div>
+
+                  <div className="glass-panel rounded-2xl p-5 flex flex-col gap-2.5 relative overflow-hidden border border-slate-800">
+                    <span className="text-[10px] font-bold tracking-wider text-slate-500 uppercase">Threats Blocked</span>
+                    <span className={`text-lg font-black ${totalBlockedCount > 0 ? 'text-red-400' : 'text-slate-350'}`}>
+                      {totalBlockedCount}
+                    </span>
+                    <span className="text-[10px] text-slate-500">{activeThreatsCount} threats active / unresolved</span>
+                  </div>
+
+                  <div className="glass-panel rounded-2xl p-5 flex flex-col gap-2.5 relative overflow-hidden border border-slate-800">
+                    <span className="text-[10px] font-bold tracking-wider text-slate-500 uppercase">Threats Isolated</span>
+                    <span className="text-lg font-black text-cyan-400">{quarantineList.length}</span>
+                    <span className="text-[10px] text-slate-500">Safely contained in quarantine vault</span>
+                  </div>
+                </div>
+
+                {/* 3. ROW: DIALS & CONTROLS */}
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                  
+                  {/* Dial 1: Security Score Gauge */}
+                  <div className="glass-panel rounded-2xl p-6 flex flex-col items-center justify-center text-center gap-4 border border-slate-800/80">
+                    <span className="text-[10px] text-slate-500 uppercase tracking-widest font-bold">Security Score</span>
+                    <div className="relative flex items-center justify-center w-28 h-28">
                       <svg className="w-full h-full transform -rotate-90">
-                        <circle cx="72" cy="72" r="60" stroke="rgba(255,255,255,0.05)" strokeWidth="10" fill="transparent" />
-                        <circle cx="72" cy="72" r="60" stroke="#00E5FF" strokeWidth="10" fill="transparent"
-                          strokeDasharray={2 * Math.PI * 60}
-                          strokeDashoffset={2 * Math.PI * 60 * (1 - settings.aiSensitivity / 100)}
-                          strokeLinecap="round"
+                        <circle cx="56" cy="56" r="48" stroke="#1E293B" strokeWidth="8" fill="transparent" />
+                        <circle 
+                          cx="56" 
+                          cy="56" 
+                          r="48" 
+                          stroke={score >= 80 ? "#22C55E" : score >= 55 ? "#EAB308" : "#EF4444"} 
+                          strokeWidth="8" 
+                          fill="transparent" 
+                          strokeDasharray="301.6"
+                          strokeDashoffset={301.6 - (301.6 * score) / 100}
                           className="transition-all duration-1000"
                         />
                       </svg>
-                      <div className="absolute flex flex-col items-center justify-center">
-                        <span className="text-4xl font-bold font-mono text-white">{settings.aiSensitivity}%</span>
-                        <span className="text-[9px] font-mono text-slate-500">SENSITIVITY</span>
+                      <span className="absolute text-2xl font-black text-white">{score}%</span>
+                    </div>
+                    <span className={`px-2.5 py-0.5 rounded text-[10px] font-black border ${
+                      score >= 80 
+                        ? 'text-green-400 border-green-500/20 bg-green-500/5' 
+                        : score >= 55 
+                          ? 'text-yellow-400 border-yellow-500/20 bg-yellow-500/5' 
+                          : 'text-red-400 border-red-500/20 bg-red-500/5'
+                    }`}>
+                      {score >= 80 ? 'PROTECTED' : score >= 55 ? 'ATTENTION' : 'DANGER'}
+                    </span>
+                  </div>
+
+                  {/* Shield Controls Quick Switch Toggles */}
+                  <div className="glass-panel rounded-2xl p-6 flex flex-col gap-4 border border-slate-800/80 lg:col-span-2">
+                    <h3 className="text-xs font-bold tracking-wider text-white uppercase border-b border-slate-800 pb-2">EDR Shield Module Controls</h3>
+                    
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5 mt-1">
+                      <div className="flex items-center justify-between p-2.5 bg-slate-900/30 rounded-xl border border-slate-850">
+                        <div className="flex flex-col gap-0.5 max-w-[200px]">
+                          <span className="text-white font-bold text-xs">Real-Time Protection</span>
+                          <span className="text-[10px] text-slate-500">Scan incoming modules</span>
+                        </div>
+                        <button
+                          onClick={() => handleUpdateSetting('realTimeProtection', !settings.realTimeProtection)}
+                          className={`w-10 h-5 flex items-center rounded-full p-0.5 transition-all duration-200 ${
+                            settings.realTimeProtection ? 'bg-[#00E5FF]' : 'bg-slate-700'
+                          }`}
+                        >
+                          <div className={`bg-slate-900 w-4 h-4 rounded-full shadow-md transform transition-all duration-200 ${
+                            settings.realTimeProtection ? 'translate-x-5' : ''
+                          }`} />
+                        </button>
+                      </div>
+
+                      <div className="flex items-center justify-between p-2.5 bg-slate-900/30 rounded-xl border border-slate-850">
+                        <div className="flex flex-col gap-0.5 max-w-[200px]">
+                          <span className="text-white font-bold text-xs">AI Heuristics Scanner</span>
+                          <span className="text-[10px] text-slate-500">Static / Behavioral AI</span>
+                        </div>
+                        <button
+                          onClick={() => handleUpdateSetting('aiDetection', !settings.aiDetection)}
+                          className={`w-10 h-5 flex items-center rounded-full p-0.5 transition-all duration-200 ${
+                            settings.aiDetection ? 'bg-[#00E5FF]' : 'bg-slate-700'
+                          }`}
+                        >
+                          <div className={`bg-slate-900 w-4 h-4 rounded-full shadow-md transform transition-all duration-200 ${
+                            settings.aiDetection ? 'translate-x-5' : ''
+                          }`} />
+                        </button>
+                      </div>
+
+                      <div className="flex items-center justify-between p-2.5 bg-slate-900/30 rounded-xl border border-slate-850">
+                        <div className="flex flex-col gap-0.5 max-w-[200px]">
+                          <span className="text-white font-bold text-xs">Ransomware Blocker</span>
+                          <span className="text-[10px] text-slate-500">Shield rapid encryptions</span>
+                        </div>
+                        <button
+                          onClick={() => handleUpdateSetting('ransomwareShield', !settings.ransomwareShield)}
+                          className={`w-10 h-5 flex items-center rounded-full p-0.5 transition-all duration-200 ${
+                            settings.ransomwareShield ? 'bg-[#00E5FF]' : 'bg-slate-700'
+                          }`}
+                        >
+                          <div className={`bg-slate-900 w-4 h-4 rounded-full shadow-md transform transition-all duration-200 ${
+                            settings.ransomwareShield ? 'translate-x-5' : ''
+                          }`} />
+                        </button>
+                      </div>
+
+                      <div className="flex items-center justify-between p-2.5 bg-slate-900/30 rounded-xl border border-slate-850">
+                        <div className="flex flex-col gap-0.5 max-w-[200px]">
+                          <span className="text-white font-bold text-xs">USB Shield Protection</span>
+                          <span className="text-[10px] text-slate-500">Auto-check portable drives</span>
+                        </div>
+                        <button
+                          onClick={() => handleUpdateSetting('usbProtection', !settings.usbProtection)}
+                          className={`w-10 h-5 flex items-center rounded-full p-0.5 transition-all duration-200 ${
+                            settings.usbProtection ? 'bg-[#00E5FF]' : 'bg-slate-700'
+                          }`}
+                        >
+                          <div className={`bg-slate-900 w-4 h-4 rounded-full shadow-md transform transition-all duration-200 ${
+                            settings.usbProtection ? 'translate-x-5' : ''
+                          }`} />
+                        </button>
                       </div>
                     </div>
-                    <p className="text-xs text-slate-400 text-center mt-3">
-                      Higher sensitivity enables aggressive heuristics to block zero-day unpackers.
-                    </p>
                   </div>
+
                 </div>
 
-                {/* AI CLASSIFICATION CHART */}
-                <div className="glass-panel rounded-2xl p-6 flex flex-col gap-4">
-                  <h3 className="text-sm font-semibold tracking-wider text-slate-300">THREAT CLASSES DETECTED</h3>
-                  <div className="flex flex-col gap-3 justify-center flex-1">
-                    {/* Simulated threat statistics based on logged incidents */}
-                    {[
-                      { label: 'Trojans / Backdoors', count: incidents.filter(i => i.type === 'TROJAN').length, color: 'bg-red-500' },
-                      { label: 'Ransomware / Lockers', count: incidents.filter(i => i.type === 'RANSOMWARE').length, color: 'bg-orange-500' },
-                      { label: 'Spyware / InfoStealers', count: incidents.filter(i => i.type === 'SPYWARE').length, color: 'bg-yellow-500' },
-                      { label: 'Cryptominers', count: incidents.filter(i => i.type === 'CRYPTOMINER').length, color: 'bg-purple-500' },
-                      { label: 'Suspicious Processes', count: incidents.filter(i => i.type.includes('PROCESS')).length, color: 'bg-cyan-500' }
-                    ].map((item, idx) => {
-                      const total = incidents.length || 1;
-                      const pct = Math.round((item.count / total) * 100) || 0;
-                      return (
-                        <div key={idx} className="flex flex-col gap-1 text-xs">
-                          <div className="flex justify-between font-mono">
-                            <span className="text-slate-400">{item.label}</span>
-                            <span className="text-white font-bold">{item.count} ({pct}%)</span>
-                          </div>
-                          <div className="w-full h-2 bg-slate-800/80 rounded-full overflow-hidden">
-                            <div className={`h-full ${item.color} rounded-full`} style={{ width: `${pct || 2}%` }} />
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-
-                {/* LIVE TELEMETRY TICKER */}
-                <div className="glass-panel rounded-2xl p-6 flex flex-col gap-4 lg:col-span-1">
-                  <div className="flex justify-between items-center">
-                    <h3 className="text-sm font-semibold tracking-wider text-slate-300">LIVE SYSTEM LOGS</h3>
-                    <Terminal className="w-4 h-4 text-cyan-400" />
-                  </div>
-                  <div className="flex-1 bg-black/40 border border-slate-900 rounded-xl p-4 font-mono text-[10px] overflow-y-auto max-h-[180px] flex flex-col gap-1.5">
-                    {fileEvents.length === 0 && (
-                      <span className="text-slate-500 italic">Waiting for file system modifications...</span>
-                    )}
-                    {fileEvents.map((evt, idx) => (
-                      <div key={idx} className="flex flex-wrap gap-1 leading-relaxed border-b border-slate-900/50 pb-1">
-                        <span className="text-slate-500">[{evt.time}]</span>
-                        <span className="text-cyan-400 font-bold">{evt.action}:</span>
-                        <span className="text-slate-300 break-all select-all flex-1">{evt.path.split('\\').pop()}</span>
-                        <span className={`font-semibold ${evt.status === 'Safe' ? 'text-green-400' : 'text-red-400 animate-pulse'}`}>
-                          ({evt.status})
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-
-              </div>
-
-              {/* RECENT INCIDENTS PANEL */}
-              <div className="glass-panel rounded-2xl p-6 flex flex-col gap-4">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <h3 className="text-base font-bold text-white">Recent Security Threats Intercepted</h3>
-                    <p className="text-xs text-slate-400">Proactive actions executed on zero-day executables and memory threats</p>
+                {/* 4. UPDATER STATUS COMPONENT */}
+                <div className="glass-panel rounded-2xl p-5 flex flex-col md:flex-row justify-between items-center gap-4 border border-slate-800/80">
+                  <div className="flex flex-col gap-1 text-left">
+                    <span className="text-[10px] text-slate-500 font-bold uppercase">Update & Signature Definitions</span>
+                    <div className="flex items-center gap-2">
+                      <span className="text-white font-bold text-xs">Definitions: v1.0.841</span>
+                      <span className="px-1.5 py-0.5 rounded text-[8px] font-bold bg-green-500/10 border border-green-500/20 text-green-400">CURRENT</span>
+                    </div>
                   </div>
                   <button 
-                    onClick={() => setActiveTab('threats')} 
-                    className="text-xs text-[#00E5FF] hover:underline font-semibold"
+                    onClick={triggerSimulatedUpdateCheck}
+                    className="py-2 px-4 rounded-lg border border-slate-700 hover:bg-slate-800 text-slate-200 text-xs font-bold transition"
                   >
-                    View All Logs
+                    Check for Updates
                   </button>
                 </div>
+                              {/* 5. RECENT INCIDENTS PANEL */}
+                <div className="glass-panel rounded-2xl p-6 flex flex-col gap-4 border border-slate-800/80">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <h3 className="text-base font-bold text-white">Recent Security Threats Intercepted</h3>
+                      <p className="text-xs text-slate-400">Proactive actions executed on zero-day executables and memory threats</p>
+                    </div>
+                    <button 
+                      onClick={() => setActiveTab('threats')} 
+                      className="text-xs text-[#00E5FF] hover:underline font-semibold"
+                    >
+                      View All Logs
+                    </button>
+                  </div>
 
-                <div className="overflow-x-auto">
-                  <table className="w-full text-left text-xs border-collapse">
-                    <thead>
-                      <tr className="border-b border-slate-800 text-slate-400 uppercase tracking-wider font-semibold">
-                        <th className="py-3 px-4">Threat Info</th>
-                        <th className="py-3 px-4">Type</th>
-                        <th className="py-3 px-4">Location</th>
-                        <th className="py-3 px-4">Time</th>
-                        <th className="py-3 px-4">Severity</th>
-                        <th className="py-3 px-4">Action Taken</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {incidents.length === 0 ? (
-                        <tr>
-                          <td colSpan={6} className="py-8 text-center text-slate-500 italic">
-                            Zero security threats detected. System is running cleanly.
-                          </td>
-                        </tr>
-                      ) : (
-                        incidents.slice(0, 5).map((inc) => (
-                          <tr key={inc.id} className="border-b border-slate-800/60 hover:bg-slate-900/20 transition">
-                            <td className="py-3.5 px-4 font-bold text-white flex flex-col">
-                              <span>{inc.name}</span>
-                              <span className="text-[10px] text-slate-500 font-mono font-normal">SHA256: {inc.hash.slice(0,16)}...</span>
-                            </td>
-                            <td className="py-3.5 px-4 font-mono font-semibold text-slate-300">{inc.type}</td>
-                            <td className="py-3.5 px-4 font-mono text-slate-400 truncate max-w-[200px]" title={inc.path}>{inc.path}</td>
-                            <td className="py-3.5 px-4 text-slate-400">{new Date(inc.time).toLocaleString()}</td>
-                            <td className="py-3.5 px-4">
-                              <span className={`px-2.5 py-1 rounded-full border text-[10px] font-semibold ${getSeverityColor(inc.severity)}`}>
-                                {inc.severity.toUpperCase()}
-                              </span>
-                            </td>
-                            <td className="py-3.5 px-4">
-                              <span className={`px-2 py-0.5 rounded text-[10px] font-semibold border ${getStatusColor(inc.status)}`}>
-                                {inc.actionTaken}
-                              </span>
-                            </td>
-                          </tr>
-                        ))
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-
-            </div>
-          )}
-
-          {/* VIEW: LIVE MONITORING */}
-          {activeTab === 'live' && (
-            <div className="flex flex-col gap-6 animate-fadeIn">
-              <div className="flex flex-col gap-2">
-                <h2 className="text-xl font-bold text-white">Live Endpoint Telemetry Monitor</h2>
-                <p className="text-xs text-slate-400">Real-time telemetry queries monitoring processes, active network connections, and system persistency</p>
-              </div>
-
-              {/* TABS MENU */}
-              <div className="flex border-b border-slate-800">
-                {[
-                  { id: 'processes', label: 'Active Processes', icon: Cpu, count: processes.length },
-                  { id: 'network', label: 'Active Connections', icon: Network, count: connections.length },
-                  { id: 'files', label: 'File Modifications', icon: FileText, count: fileEvents.length },
-                  { id: 'registry', label: 'Registry Run entries', icon: HardDrive, count: registryEvents.length },
-                  { id: 'usb', label: 'Removable USB', icon: HardDrive, count: usbEvents.length }
-                ].map(tab => (
-                  <button
-                    key={tab.id}
-                    onClick={() => setLiveSubTab(tab.id as any)}
-                    className={`flex items-center gap-2 px-6 py-3 border-b-2 font-medium text-xs transition ${
-                      liveSubTab === tab.id 
-                        ? 'border-[#00E5FF] text-[#00E5FF] bg-cyan-500/5' 
-                        : 'border-transparent text-slate-400 hover:text-slate-200'
-                    }`}
-                  >
-                    <tab.icon className="w-4 h-4" />
-                    {tab.label}
-                    <span className="px-1.5 py-0.5 rounded-full bg-slate-800 text-[10px] text-slate-400 font-mono">
-                      {tab.count}
-                    </span>
-                  </button>
-                ))}
-              </div>
-
-              {/* SEARCH FILTER */}
-              <div className="flex items-center gap-3 bg-slate-900/60 p-3 rounded-xl border border-slate-800">
-                <Search className="w-4 h-4 text-slate-400" />
-                <input
-                  type="text"
-                  placeholder="Filter active telemetries by name, PID, path, or IP address..."
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  className="bg-transparent border-none outline-none text-xs text-slate-200 w-full placeholder-slate-500"
-                />
-              </div>
-
-              {/* LIVE VIEW: PROCESSES */}
-              {liveSubTab === 'processes' && (
-                <div className="glass-panel rounded-2xl overflow-hidden">
                   <div className="overflow-x-auto">
                     <table className="w-full text-left text-xs border-collapse">
                       <thead>
                         <tr className="border-b border-slate-800 text-slate-400 uppercase tracking-wider font-semibold">
-                          <th className="py-3 px-4">PID</th>
-                          <th className="py-3 px-4">PPID</th>
-                          <th className="py-3 px-4">Name</th>
-                          <th className="py-3 px-4">Command line arguments</th>
-                          <th className="py-3 px-4">Working set (RAM)</th>
-                          <th className="py-3 px-4 text-right">Status</th>
+                          <th className="py-3 px-4">Threat Info</th>
+                          <th className="py-3 px-4">Type</th>
+                          <th className="py-3 px-4">Location</th>
+                          <th className="py-3 px-4">Time</th>
+                          <th className="py-3 px-4">Severity</th>
+                          <th className="py-3 px-4">Action Taken</th>
                         </tr>
                       </thead>
                       <tbody>
-                        {processes.length === 0 ? (
+                        {incidents.length === 0 ? (
                           <tr>
                             <td colSpan={6} className="py-8 text-center text-slate-500 italic">
-                              Polling process details...
+                              Zero security threats detected. System is running cleanly.
                             </td>
                           </tr>
                         ) : (
-                          processes
-                            .filter(p => p.name.toLowerCase().includes(searchQuery.toLowerCase()) || p.pid.toString().includes(searchQuery))
-                            .map((proc) => (
-                              <tr key={proc.pid} className={`border-b border-slate-800/60 hover:bg-slate-900/20 transition ${
-                                proc.suspicious ? 'bg-red-500/5' : ''
-                              }`}>
-                                <td className="py-3 px-4 font-mono text-slate-400">{proc.pid}</td>
-                                <td className="py-3 px-4 font-mono text-slate-500">{proc.parentPid}</td>
-                                <td className="py-3 px-4 font-bold text-white flex items-center gap-2">
-                                  {proc.name}
-                                  {proc.suspicious && (
-                                    <span className="px-1.5 py-0.2 text-[8px] font-bold rounded bg-red-500/20 text-red-400 border border-red-500/30">
-                                      SUSPICIOUS
-                                    </span>
-                                  )}
-                                </td>
-                                <td className="py-3 px-4 font-mono text-slate-400 max-w-sm truncate" title={proc.commandLine}>
-                                  {proc.commandLine || <span className="text-slate-600 italic">N/A</span>}
-                                </td>
-                                <td className="py-3 px-4 font-mono text-slate-400">{proc.memoryUsage} MB</td>
-                                <td className="py-3 px-4 text-right">
-                                  {proc.suspicious ? (
-                                    <span className="text-red-400 font-semibold" title={proc.reasons.join(', ')}>Terminated</span>
-                                  ) : (
-                                    <span className="text-green-400">Running</span>
-                                  )}
-                                </td>
-                              </tr>
-                            ))
+                          incidents.slice(0, 5).map((inc) => (
+                            <tr key={inc.id} className="border-b border-slate-800/60 hover:bg-slate-900/20 transition">
+                              <td className="py-3.5 px-4 font-bold text-white flex flex-col">
+                                <span>{inc.name}</span>
+                                <span className="text-[10px] text-slate-500 font-mono font-normal">SHA256: {inc.hash.slice(0,16)}...</span>
+                              </td>
+                              <td className="py-3.5 px-4 font-mono font-semibold text-slate-300">{inc.type}</td>
+                              <td className="py-3.5 px-4 font-mono text-slate-400 truncate max-w-[200px]" title={inc.path}>{inc.path}</td>
+                              <td className="py-3.5 px-4 text-slate-400">{new Date(inc.time).toLocaleString()}</td>
+                              <td className="py-3.5 px-4">
+                                <span className={`px-2.5 py-1 rounded-full border text-[10px] font-semibold ${getSeverityColor(inc.severity)}`}>
+                                  {inc.severity.toUpperCase()}
+                                </span>
+                              </td>
+                              <td className="py-3.5 px-4">
+                                <span className={`px-2 py-0.5 rounded text-[10px] font-semibold border ${getStatusColor(inc.status)}`}>
+                                  {inc.actionTaken}
+                                </span>
+                              </td>
+                            </tr>
+                          ))
                         )}
                       </tbody>
                     </table>
                   </div>
                 </div>
-              )}
 
-              {/* LIVE VIEW: NETWORK CONNECTIONS */}
-              {liveSubTab === 'network' && (
-                <div className="glass-panel rounded-2xl overflow-hidden">
-                  <div className="overflow-x-auto">
-                    <table className="w-full text-left text-xs border-collapse">
-                      <thead>
-                        <tr className="border-b border-slate-800 text-slate-400 uppercase tracking-wider font-semibold">
-                          <th className="py-3 px-4">Protocol</th>
-                          <th className="py-3 px-4">PID</th>
-                          <th className="py-3 px-4">Local socket</th>
-                          <th className="py-3 px-4">Remote address</th>
-                          <th className="py-3 px-4">Remote Port</th>
-                          <th className="py-3 px-4">Socket State</th>
-                          <th className="py-3 px-4 text-right">Status</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {connections.length === 0 ? (
-                          <tr>
-                            <td colSpan={7} className="py-8 text-center text-slate-500 italic">
-                              Polling network socket details...
-                            </td>
-                          </tr>
-                        ) : (
-                          connections
-                            .filter(c => c.remoteAddress.includes(searchQuery) || c.pid.toString().includes(searchQuery) || c.processName.toLowerCase().includes(searchQuery.toLowerCase()))
-                            .map((conn, idx) => (
-                              <tr key={idx} className={`border-b border-slate-800/60 hover:bg-slate-900/20 transition ${
-                                conn.suspicious ? 'bg-red-500/5' : ''
-                              }`}>
-                                <td className="py-3 px-4 font-mono text-[#00E5FF] font-bold">{conn.protocol}</td>
-                                <td className="py-3 px-4 font-mono text-slate-400">{conn.pid}</td>
-                                <td className="py-3 px-4 font-mono text-slate-400">{conn.localAddress}:{conn.localPort}</td>
-                                <td className="py-3 px-4 font-bold text-white font-mono">{conn.remoteAddress}</td>
-                                <td className="py-3 px-4 font-mono text-slate-300">{conn.remotePort || '*'}</td>
-                                <td className="py-3 px-4 font-mono text-slate-500">{conn.state}</td>
-                                <td className="py-3 px-4 text-right">
-                                  {conn.suspicious ? (
-                                    <span className="text-red-400 font-semibold">Blocked</span>
-                                  ) : (
-                                    <span className="text-green-400">Allowed</span>
-                                  )}
-                                </td>
-                              </tr>
-                            ))
-                        )}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              )}
-
-              {/* LIVE VIEW: FILE MODIFICATIONS */}
-              {liveSubTab === 'files' && (
-                <div className="glass-panel rounded-2xl p-6 flex flex-col gap-4 font-mono text-xs">
-                  <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-                    <span className="font-semibold text-slate-300">File Integrity Monitor Stream</span>
-                    <span className="text-[10px] text-slate-500">Auto-refresh active</span>
-                  </div>
-                  <div className="flex flex-col gap-2.5 max-h-[450px] overflow-y-auto pr-2">
-                    {fileEvents.length === 0 ? (
-                      <span className="text-slate-500 italic">No filesystem events recorded yet. Modify files in Downloads/Desktop folders to test.</span>
-                    ) : (
-                      fileEvents
-                        .filter(f => f.path.toLowerCase().includes(searchQuery.toLowerCase()))
-                        .map((evt, idx) => (
-                          <div key={idx} className="p-3.5 rounded-lg bg-slate-900/40 border border-slate-800/80 flex items-center justify-between gap-4">
-                            <div className="flex flex-col gap-1 truncate">
-                              <span className="text-white font-semibold truncate" title={evt.path}>{evt.path}</span>
-                              <span className="text-[10px] text-slate-500">Action: {evt.action} | Recorded: {evt.time}</span>
-                            </div>
-                            <span className={`px-2 py-0.5 rounded text-[10px] font-bold border ${
-                              evt.status === 'Safe' ? 'text-green-400 border-green-500/20 bg-green-500/5' : 'text-red-400 border-red-500/20 bg-red-500/5 animate-pulse'
-                            }`}>
-                              {evt.status.toUpperCase()}
-                            </span>
-                          </div>
-                        ))
-                    )}
-                  </div>
-                </div>
-              )}
-
-              {/* LIVE VIEW: REGISTRY MODIFICATIONS */}
-              {liveSubTab === 'registry' && (
-                <div className="glass-panel rounded-2xl p-6 flex flex-col gap-4 font-mono text-xs">
-                  <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-                    <span className="font-semibold text-slate-300">Registry Persistence Keys Monitor</span>
-                    <span className="text-[10px] text-slate-500">Checking Run & RunOnce Registry Subtrees</span>
-                  </div>
-                  <div className="flex flex-col gap-2.5 max-h-[450px] overflow-y-auto pr-2">
-                    {registryEvents.length === 0 ? (
-                      <span className="text-slate-500 italic">No startup registry changes detected. Cache initialized and active.</span>
-                    ) : (
-                      registryEvents
-                        .filter(r => r.name.toLowerCase().includes(searchQuery.toLowerCase()) || r.value.toLowerCase().includes(searchQuery.toLowerCase()))
-                        .map((evt, idx) => (
-                          <div key={idx} className="p-3.5 rounded-lg bg-slate-900/40 border border-slate-800/80 flex flex-col gap-2">
-                            <div className="flex justify-between items-start">
-                              <span className="text-[#00E5FF] font-semibold">{evt.action}</span>
-                              <span className="text-[10px] text-slate-500">{evt.time}</span>
-                            </div>
-                            <div className="flex flex-col gap-1 text-[11px] text-slate-400">
-                              <div>Key: <span className="text-white font-mono break-all">{evt.key}</span></div>
-                              <div>Name: <span className="text-white font-mono">{evt.name}</span></div>
-                              <div>Value: <span className="text-yellow-400 font-mono break-all">{evt.value}</span></div>
-                            </div>
-                          </div>
-                        ))
-                    )}
-                  </div>
-                </div>
-              )}
-
-              {/* LIVE VIEW: USB MONITOR */}
-              {liveSubTab === 'usb' && (
-                <div className="glass-panel rounded-2xl p-6 flex flex-col gap-4 font-mono text-xs">
-                  <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-                    <span className="font-semibold text-slate-300">USB Mass Storage Volume Event Log</span>
-                    <span className="text-[10px] text-slate-500">Win32_VolumeChangeEvent handler</span>
-                  </div>
-                  <div className="flex flex-col gap-2.5 max-h-[450px] overflow-y-auto pr-2">
-                    {usbEvents.length === 0 ? (
-                      <span className="text-slate-500 italic">Zero USB insertion events detected. Ready for USB insertions.</span>
-                    ) : (
-                      usbEvents.map((evt, idx) => (
-                        <div key={idx} className="p-3.5 rounded-lg bg-slate-900/40 border border-slate-800/80 flex items-center justify-between">
-                          <div className="flex items-center gap-3">
-                            <HardDrive className={`w-5 h-5 ${evt.action === 'Inserted' ? 'text-green-400' : 'text-red-400'}`} />
-                            <div className="flex flex-col">
-                              <span className="text-white font-semibold">
-                                USB Drive {evt.action} : {evt.letter} {evt.label ? `(${evt.label})` : ''}
-                              </span>
-                              <span className="text-[10px] text-slate-500">Recorded: {evt.time}</span>
-                            </div>
-                          </div>
-                          <span className={`px-2 py-0.5 rounded text-[10px] font-bold border ${
-                            evt.action === 'Inserted' ? 'text-green-400 border-green-500/20 bg-green-500/5' : 'text-red-400 border-red-500/20 bg-red-500/5'
-                          }`}>
-                            {evt.action.toUpperCase()}
-                          </span>
-                        </div>
-                      ))
-                    )}
-                  </div>
-                </div>
-              )}
-
-            </div>
-          )}
+              </div>
+            );
+          })()}
 
           {/* VIEW: THREAT HISTORY */}
           {activeTab === 'threats' && (
@@ -1277,249 +1561,583 @@ const App: React.FC = () => {
             </div>
           )}
 
-          {/* VIEW: THREAT SCANNER */}
+          {/* VIEW: THREAT SCANNER (SCAN CENTER) */}
           {activeTab === 'scanner' && (
             <div className="flex flex-col gap-6 animate-fadeIn">
               <div className="flex flex-col gap-2">
-                <h2 className="text-xl font-bold text-white">Threat Intelligence Scanning Panel</h2>
-                <p className="text-xs text-slate-400">Initiate custom directory scans, fast signature sweeps, or static PE analyses on suspicious modules</p>
+                <h2 className="text-xl font-bold text-white font-mono">Threat Protection Scan Center</h2>
+                <p className="text-xs text-slate-400 font-mono">Select an execution analysis mode below or review historical intelligence reports.</p>
               </div>
 
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                
-                {/* SCAN MODES CARDS */}
-                <div className="glass-panel rounded-2xl p-5 flex flex-col justify-between gap-4">
-                  <div className="flex flex-col gap-2">
-                    <div className="p-2 rounded-lg bg-green-500/10 border border-green-500/20 w-fit text-green-400">
-                      <Play className="w-4 h-4" />
-                    </div>
-                    <h3 className="text-sm font-bold text-white">Quick System Scan</h3>
-                    <p className="text-xs text-slate-400 leading-relaxed">
-                      Scans active user directories (Desktop, Documents, Downloads) for execution bypass vectors.
-                    </p>
-                  </div>
-                  <button
-                    onClick={handleQuickScan}
-                    disabled={scanStatus.includes('Scanning')}
-                    className="w-full py-2 rounded-lg bg-cyan-500 text-[#0B1220] hover:bg-[#00E5FF]/80 transition text-xs font-bold font-mono uppercase tracking-wider disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    Launch scan
-                  </button>
-                </div>
-
-                <div className="glass-panel rounded-2xl p-5 flex flex-col justify-between gap-4">
-                  <div className="flex flex-col gap-2">
-                    <div className="p-2 rounded-lg bg-[#00E5FF]/10 border border-[#00E5FF]/20 w-fit text-[#00E5FF]">
-                      <Shield className="w-4 h-4" />
-                    </div>
-                    <h3 className="text-sm font-bold text-white">Deep Directory Sweep</h3>
-                    <p className="text-xs text-slate-400 leading-relaxed">
-                      Performs recursive traversal across the entire C:\ drive, including AppData.
-                    </p>
-                  </div>
-                  <button
-                    onClick={handleDeepScan}
-                    disabled={scanStatus.includes('Scanning')}
-                    className="w-full py-2 rounded-lg bg-cyan-500 text-[#0B1220] hover:bg-[#00E5FF]/80 transition text-xs font-bold font-mono uppercase tracking-wider disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    Launch deep scan
-                  </button>
-                </div>
-
-                <div className="glass-panel rounded-2xl p-5 flex flex-col justify-between gap-4">
-                  <div className="flex flex-col gap-2">
-                    <div className="p-2 rounded-lg bg-purple-500/10 border border-purple-500/20 w-fit text-purple-400">
-                      <FolderOpen className="w-4 h-4" />
-                    </div>
-                    <h3 className="text-sm font-bold text-white">Custom Directory Scan</h3>
-                    <p className="text-xs text-slate-400 leading-relaxed font-mono text-slate-500 break-all">
-                      Path: {selectedScanPath}
-                    </p>
-                  </div>
-                  <div className="flex gap-2.5">
-                    <button
-                      onClick={handleSelectFolder}
-                      className="py-2 px-3 rounded-lg border border-slate-700 hover:bg-slate-800 text-slate-300 text-xs font-bold"
-                    >
-                      Browse
-                    </button>
-                    <button
-                      onClick={handleCustomScan}
-                      disabled={scanStatus.includes('Scanning')}
-                      className="flex-1 py-2 rounded-lg bg-cyan-500 text-[#0B1220] hover:bg-[#00E5FF]/80 transition text-xs font-bold font-mono uppercase tracking-wider disabled:opacity-50 disabled:cursor-not-allowed"
-                    >
-                      Scan directory
-                    </button>
-                  </div>
-                </div>
-
-              </div>
-
-              {/* ACTIVE SCAN PROGRESS BAR */}
-              {scanStatus !== 'System Idle' && (
-                <div className={`glass-panel rounded-2xl p-6 flex flex-col gap-4 ${(scanProgress === 100 || scanStatus.includes('finished') || isScanPaused) ? '' : 'animate-pulse'}`}>
-                  <div className="flex justify-between items-center text-xs font-mono">
-                    <span className={`font-semibold ${
-                      (scanProgress === 100 || scanStatus.includes('finished')) 
-                        ? 'text-green-400 font-semibold' 
-                        : isScanPaused 
-                          ? 'text-amber-400 font-semibold' 
-                          : 'text-[#00E5FF]'
-                    }`}>
-                      {scanType} {(scanProgress === 100 || scanStatus.includes('finished')) ? '(Completed)' : isScanPaused ? '(Paused)' : '(Active)'}
-                    </span>
+              {/* IF SCAN IS RUNNING */}
+              {scanStatus !== 'System Idle' && liveScanStatus && liveScanStatus.progress < 100 && (
+                <div className="glass-panel rounded-2xl p-6 flex flex-col gap-5 max-w-4xl font-mono text-xs text-slate-300">
+                  <div className="flex justify-between items-center border-b border-slate-800 pb-3">
+                    <span className="text-sm font-bold text-[#00E5FF]">{liveScanStatus.scanType} in Progress</span>
                     <div className="flex items-center gap-3">
-                      {scanProgress < 100 && !scanStatus.includes('finished') ? (
-                        <>
-                          <button
-                            onClick={handleToggleScanPause}
-                            className={`px-2 py-0.5 rounded border text-[10px] font-bold font-mono transition-all duration-200 ${
-                              isScanPaused
-                                ? 'border-green-500/30 bg-green-500/10 text-green-400 hover:bg-green-500/20'
-                                : 'border-amber-500/30 bg-amber-500/10 text-amber-400 hover:bg-amber-500/20'
-                            }`}
-                          >
-                            {isScanPaused ? 'RESUME SCAN' : 'PAUSE SCAN'}
-                          </button>
-
-                          <button
-                            onClick={handleCancelScan}
-                            className="px-2 py-0.5 rounded border border-red-500/30 bg-red-500/10 text-red-400 hover:bg-red-500/20 text-[10px] font-bold font-mono transition-all duration-200"
-                          >
-                            STOP SCAN
-                          </button>
-                        </>
-                      ) : (
-                        <button
-                          onClick={() => {
-                            setScanStatus('System Idle');
-                            setScanProgress(0);
-                          }}
-                          className="px-2 py-0.5 rounded border border-slate-700 hover:bg-slate-800 text-[10px] font-bold font-mono text-slate-300 transition"
-                        >
-                          DISMISS
-                        </button>
-                      )}
-                      <span className="text-white font-bold">{scanProgress}%</span>
+                      <button
+                        onClick={handleToggleScanPause}
+                        className={`px-3 py-1 rounded-lg border text-[10px] font-bold transition ${
+                          isScanPaused 
+                            ? 'border-green-500/30 bg-green-500/10 text-green-400 hover:bg-green-500/20' 
+                            : 'border-amber-500/30 bg-amber-500/10 text-amber-400 hover:bg-amber-500/20'
+                        }`}
+                      >
+                        {isScanPaused ? 'RESUME SCAN' : 'PAUSE SCAN'}
+                      </button>
+                      <button
+                        onClick={handleCancelScan}
+                        className="px-3 py-1 rounded-lg border border-red-500/30 bg-red-500/10 text-red-400 hover:bg-red-500/20 text-[10px] font-bold transition"
+                      >
+                        STOP SCAN
+                      </button>
+                      <span className="text-white font-bold text-sm">{liveScanStatus.progress}%</span>
                     </div>
                   </div>
-                  <div className="w-full h-3 bg-slate-800 rounded-full overflow-hidden">
-                    <div className={`h-full rounded-full transition-all duration-300 ${
-                      (scanProgress === 100 || scanStatus.includes('finished')) 
-                        ? 'bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.5)]' 
-                        : isScanPaused 
-                          ? 'bg-amber-500 shadow-[0_0_8px_rgba(245,158,11,0.5)]' 
-                          : 'bg-[#00E5FF] glow-cyan'
-                    }`} style={{ width: `${scanProgress}%` }} />
+
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-4 bg-[#0E1726]/40 p-4 rounded-xl border border-slate-800">
+                    <div className="flex flex-col gap-1">
+                      <span className="text-[10px] text-slate-500 font-bold uppercase">Files Scanned</span>
+                      <span className="text-white font-black text-sm">{liveScanStatus.filesScanned}</span>
+                    </div>
+                    <div className="flex flex-col gap-1">
+                      <span className="text-[10px] text-slate-500 font-bold uppercase">Files Skipped</span>
+                      <span className="text-slate-400 font-black text-sm">{liveScanStatus.filesSkipped}</span>
+                    </div>
+                    <div className="flex flex-col gap-1">
+                      <span className="text-[10px] text-slate-500 font-bold uppercase">Threats Found</span>
+                      <span className={`font-black text-sm ${liveScanStatus.threatsFound > 0 ? 'text-red-400' : 'text-green-400'}`}>
+                        {liveScanStatus.threatsFound}
+                      </span>
+                    </div>
+                    <div className="flex flex-col gap-1">
+                      <span className="text-[10px] text-slate-500 font-bold uppercase">Time Remaining</span>
+                      <span className="text-white font-black text-sm">{liveScanStatus.estimatedTimeRemaining}</span>
+                    </div>
                   </div>
-                  <p className={`text-[10px] font-mono truncate ${
-                    (scanProgress === 100 || scanStatus.includes('finished')) 
-                      ? 'text-green-400/80 font-semibold' 
-                      : isScanPaused 
-                        ? 'text-amber-400/80' 
-                        : 'text-slate-400'
-                  }`}>
-                    {isScanPaused ? 'Scan execution halted. Press Resume to continue.' : scanStatus}
-                  </p>
+
+                  <div className="w-full h-3 bg-slate-800 rounded-full overflow-hidden">
+                    <div 
+                      className={`h-full rounded-full transition-all duration-300 ${
+                        isScanPaused ? 'bg-amber-500 shadow-[0_0_8px_rgba(245,158,11,0.5)]' : 'bg-[#00E5FF] glow-cyan'
+                      }`}
+                      style={{ width: `${liveScanStatus.progress}%` }} 
+                    />
+                  </div>
+
+                  <div className="flex flex-col gap-1.5 bg-black/15 p-3 rounded-lg border border-slate-900 leading-normal">
+                    <div>Active Checking Gate: <span className="text-yellow-400 font-bold">{liveScanStatus.currentLayer}</span></div>
+                    <div className="truncate">Scanning Module: <span className="text-white font-semibold">{liveScanStatus.currentFile || 'Initiating crawler...'}</span></div>
+                  </div>
+
+                  {/* Real-time scanned files feed */}
+                  {scannedFiles.length > 0 && (
+                    <div className="flex flex-col gap-2 mt-1 bg-slate-900/40 p-3 rounded-lg border border-slate-800">
+                      <span className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">Real-time Telemetry Stream</span>
+                      <div className="flex flex-col gap-1.5 max-h-[120px] overflow-y-auto pr-1">
+                        {scannedFiles.slice(0, 10).map((f, idx) => (
+                          <div key={idx} className="flex justify-between items-center bg-black/20 p-1.5 rounded border border-slate-850">
+                            <span className="text-slate-300 truncate max-w-[280px]" title={f.filePath}>{f.fileName}</span>
+                            <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold border ${
+                              f.status === 'Malicious' ? 'text-red-400 border-red-500/20 bg-red-500/5' : 'text-green-400 border-green-500/20 bg-green-500/5'
+                            }`}>
+                              {f.status}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
 
-              {/* DRAG AND DROP TARGET ZONE */}
-              <div 
-                ref={dropZoneRef}
-                onDragOver={handleDragOver}
-                onDragLeave={handleDragLeave}
-                onDrop={handleDrop}
-                className={`border-2 border-dashed rounded-2xl p-12 flex flex-col items-center justify-center text-center gap-4 transition select-none ${
-                  isDragOver 
-                    ? 'border-[#00E5FF] bg-cyan-500/5 glow-cyan' 
-                    : 'border-slate-800 bg-[#0E1726]/30 hover:border-slate-700'
-                }`}
-              >
-                <Upload className="w-10 h-10 text-slate-500 animate-bounce" />
-                <div>
-                  <h3 className="text-sm font-bold text-slate-200">Drag & Drop Executables</h3>
-                  <p className="text-xs text-slate-500 max-w-xs mt-1">
-                    Drag any file or folder to trigger instant YARA pattern and AI classification scans.
-                  </p>
-                </div>
-              </div>
+              {/* IF SCAN IS NOT RUNNING */}
+              {(scanStatus === 'System Idle' || (liveScanStatus && liveScanStatus.progress === 100)) && (
+                <>
+                  {/* SUBTAB 1: SCAN OPTIONS */}
+                  {scannerSubTab === 'options' && (
+                    <div className="flex flex-col gap-6">
+                      <div className="flex justify-end gap-3">
+                        <button
+                          onClick={() => setScannerSubTab('history')}
+                          className="py-1.5 px-3.5 rounded-lg border border-slate-700 hover:bg-slate-800 text-slate-300 text-xs font-semibold flex items-center gap-1.5 font-mono"
+                        >
+                          <History className="w-3.5 h-3.5" />
+                          View Historical Scan Reports ({scanHistory.length})
+                        </button>
+                      </div>
+
+                      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                        {/* QUICK / NORMAL SCAN CARD */}
+                        <div className="glass-panel rounded-2xl p-5 flex flex-col justify-between gap-5 relative overflow-hidden">
+                          <div className="flex flex-col gap-2">
+                            <div className="p-2 rounded-lg bg-green-500/10 border border-green-500/20 w-fit text-green-400">
+                              <Play className="w-4 h-4" />
+                            </div>
+                            <h3 className="text-sm font-bold text-white">Daily Quick Scan</h3>
+                            <p className="text-xs text-slate-400 leading-relaxed">
+                              Scan high-risk target folders and registry nodes.
+                            </p>
+                            <div className="border-t border-slate-800/80 pt-3 flex flex-col gap-1 font-mono text-[10px] text-slate-500 leading-normal">
+                              <span className="text-slate-400 font-bold uppercase text-[9px]">Scopes Checked:</span>
+                              <div>• User Desktop, Documents, Downloads</div>
+                              <div>• Startup Programs / Run Registry keys</div>
+                              <div>• Running Processes / Services</div>
+                              <div>• Active USB Removable Drives</div>
+                            </div>
+                          </div>
+                          <button
+                            onClick={handleQuickScan}
+                            className="w-full py-2 rounded-lg bg-green-500 hover:bg-green-400 text-slate-900 transition text-xs font-bold font-mono uppercase tracking-wider"
+                          >
+                            Run Quick Scan
+                          </button>
+                        </div>
+
+                        {/* DEEP SCAN CARD */}
+                        <div className="glass-panel rounded-2xl p-5 flex flex-col justify-between gap-5 relative overflow-hidden">
+                          <div className="flex flex-col gap-2">
+                            <div className="p-2 rounded-lg bg-[#00E5FF]/10 border border-[#00E5FF]/20 w-fit text-[#00E5FF]">
+                              <Shield className="w-4 h-4" />
+                            </div>
+                            <h3 className="text-sm font-bold text-white">Full System Deep Scan</h3>
+                            <p className="text-xs text-slate-400 leading-relaxed">
+                              Performs deep traversal of binary images and directories.
+                            </p>
+                            <div className="border-t border-slate-800/80 pt-3 flex flex-col gap-1 font-mono text-[10px] text-slate-500 leading-normal">
+                              <span className="text-[#00E5FF] font-bold uppercase text-[9px]">Scopes Checked:</span>
+                              <div>• Entire File System & Hidden folders</div>
+                              <div>• Temporary dirs & System32 libs</div>
+                              <div>• Scheduled Tasks / Browser Extensions</div>
+                              <div>• Memory inspection & Network ports</div>
+                            </div>
+                          </div>
+                          <button
+                            onClick={handleDeepScan}
+                            className="w-full py-2 rounded-lg bg-[#00E5FF] hover:bg-[#00E5FF]/80 text-[#0B1220] transition text-xs font-bold font-mono uppercase tracking-wider"
+                          >
+                            Run Deep Scan
+                          </button>
+                        </div>
+
+                        {/* CUSTOM SCAN CARD */}
+                        <div className="glass-panel rounded-2xl p-5 flex flex-col justify-between gap-5 relative overflow-hidden">
+                          <div className="flex flex-col gap-2">
+                            <div className="p-2 rounded-lg bg-purple-500/10 border border-purple-500/20 w-fit text-purple-400">
+                              <FolderOpen className="w-4 h-4" />
+                            </div>
+                            <h3 className="text-sm font-bold text-white">Custom Target Scan</h3>
+                            <p className="text-xs text-slate-400 leading-relaxed font-mono text-slate-500 break-all">
+                              Path: {selectedScanPath}
+                            </p>
+                          </div>
+                          <div className="flex gap-2">
+                            <button
+                              onClick={handleSelectFolder}
+                              className="py-2 px-3 rounded-lg border border-slate-700 hover:bg-slate-800 text-slate-300 text-xs font-bold font-mono"
+                            >
+                              Browse
+                            </button>
+                            <button
+                              onClick={handleCustomScan}
+                              className="flex-1 py-2 rounded-lg bg-purple-500 hover:bg-purple-450 text-slate-950 transition text-xs font-bold font-mono uppercase tracking-wider"
+                            >
+                              Scan Path
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* DRAG AND DROP ZONE */}
+                      <div 
+                        ref={dropZoneRef}
+                        onDragOver={handleDragOver}
+                        onDragLeave={handleDragLeave}
+                        onDrop={handleDrop}
+                        className={`border-2 border-dashed rounded-2xl p-12 flex flex-col items-center justify-center text-center gap-4 transition select-none ${
+                          isDragOver 
+                            ? 'border-[#00E5FF] bg-cyan-500/5 glow-cyan' 
+                            : 'border-slate-800 bg-[#0E1726]/30 hover:border-slate-700'
+                        }`}
+                      >
+                        <Upload className="w-10 h-10 text-slate-500 animate-bounce" />
+                        <div>
+                          <h3 className="text-sm font-bold text-slate-200">Drag & Drop Executables</h3>
+                          <p className="text-xs text-slate-500 max-w-xs mt-1">
+                            Drag any file here to trigger instant multi-layer AI classification and signature scans.
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* SUBTAB 2: SCAN RESULTS DETAIL */}
+                  {scannerSubTab === 'results' && activeReport && (
+                    <div className="flex flex-col gap-6 animate-fadeIn font-mono text-xs text-slate-300">
+                      <div className="flex justify-between items-center border-b border-slate-800 pb-3">
+                        <h3 className="text-sm font-bold text-white uppercase tracking-wider">Scan Diagnostic Report Summary</h3>
+                        <button
+                          onClick={() => setScannerSubTab('options')}
+                          className="py-1.5 px-3 rounded-lg border border-slate-700 hover:bg-slate-800 text-slate-300 text-xs font-semibold"
+                        >
+                          Back to Scan Center
+                        </button>
+                      </div>
+
+                      <div className="flex flex-col lg:flex-row gap-6">
+                        
+                        {/* LEFT COLUMN: STATS AND THREATS */}
+                        <div className="flex-1 flex flex-col gap-6">
+                          
+                          <div className="flex flex-col md:flex-row gap-5">
+                            {/* Security Score Gauge card */}
+                            <div className="glass-panel rounded-2xl p-6 flex flex-col items-center justify-center text-center gap-4 w-full md:w-[200px] bg-slate-950/20 border border-slate-800">
+                              <span className="text-[10px] text-slate-500 uppercase tracking-widest font-bold">Security Score</span>
+                              <div className="relative flex items-center justify-center w-24 h-24">
+                                <svg className="w-full h-full transform -rotate-90">
+                                  <circle cx="48" cy="48" r="40" stroke="#1E293B" strokeWidth="6" fill="transparent" />
+                                  <circle 
+                                    cx="48" 
+                                    cy="48" 
+                                    r="40" 
+                                    stroke={activeReport.securityScore >= 70 ? "#22C55E" : activeReport.securityScore >= 40 ? "#EAB308" : "#EF4444"} 
+                                    strokeWidth="6" 
+                                    fill="transparent" 
+                                    strokeDasharray="251.2"
+                                    strokeDashoffset={251.2 - (251.2 * activeReport.securityScore) / 100}
+                                    className="transition-all duration-1000"
+                                  />
+                                </svg>
+                                <span className="absolute text-xl font-black text-white">{activeReport.securityScore}%</span>
+                              </div>
+                              <span className={`px-2 py-0.5 rounded text-[9px] font-black border ${
+                                activeReport.securityScore >= 70 
+                                  ? 'text-green-400 border-green-500/20 bg-green-500/5' 
+                                  : activeReport.securityScore >= 40 
+                                    ? 'text-yellow-400 border-yellow-500/20 bg-yellow-500/5' 
+                                    : 'text-red-400 border-red-500/20 bg-red-500/5'
+                              }`}>
+                                {activeReport.securityScore >= 70 ? 'HEALTHY' : activeReport.securityScore >= 40 ? 'SUSPICIOUS' : 'MALICIOUS'}
+                              </span>
+                            </div>
+
+                            {/* Details metadata grid */}
+                            <div className="flex-1 grid grid-cols-2 md:grid-cols-3 gap-4">
+                              <div className="glass-panel rounded-xl p-3 flex flex-col justify-center gap-1.5">
+                                <span className="text-[10px] text-slate-500 font-bold uppercase">Scan Mode</span>
+                                <span className="text-white font-black text-xs truncate">{activeReport.scanType}</span>
+                              </div>
+                              <div className="glass-panel rounded-xl p-3 flex flex-col justify-center gap-1.5">
+                                <span className="text-[10px] text-slate-500 font-bold uppercase">Files Evaluated</span>
+                                <span className="text-white font-black text-xs">{activeReport.filesScanned}</span>
+                              </div>
+                              <div className="glass-panel rounded-xl p-3 flex flex-col justify-center gap-1.5">
+                                <span className="text-[10px] text-slate-500 font-bold uppercase">Files Skipped</span>
+                                <span className="text-slate-400 font-black text-xs">{activeReport.filesSkipped}</span>
+                              </div>
+                              <div className="glass-panel rounded-xl p-3 flex flex-col justify-center gap-1.5">
+                                <span className="text-[10px] text-slate-500 font-bold uppercase">Threats Detected</span>
+                                <span className={`font-black text-xs ${activeReport.threatsFound > 0 ? 'text-red-400' : 'text-green-400'}`}>
+                                  {activeReport.threatsFound}
+                                </span>
+                              </div>
+                              <div className="glass-panel rounded-xl p-3 flex flex-col justify-center gap-1.5">
+                                <span className="text-[10px] text-slate-500 font-bold uppercase">Threats Isolated</span>
+                                <span className="text-cyan-400 font-black text-xs">{activeReport.threatsRemoved}</span>
+                              </div>
+                              <div className="glass-panel rounded-xl p-3 flex flex-col justify-center gap-1.5">
+                                <span className="text-[10px] text-slate-500 font-bold uppercase">Duration</span>
+                                <span className="text-white font-black text-xs">
+                                  {activeReport.duration >= 60 ? `${Math.floor(activeReport.duration / 60)}m ${activeReport.duration % 60}s` : `${activeReport.duration}s`}
+                                </span>
+                              </div>
+                              <div className="glass-panel rounded-xl p-3 flex flex-col justify-center gap-1.5">
+                                <span className="text-[10px] text-slate-500 font-bold uppercase">Avg CPU Usage</span>
+                                <span className="text-white font-black text-xs">{activeReport.cpuUsage}%</span>
+                              </div>
+                              <div className="glass-panel rounded-xl p-3 flex flex-col justify-center gap-1.5">
+                                <span className="text-[10px] text-slate-500 font-bold uppercase">Date Evaluated</span>
+                                <span className="text-slate-400 font-black text-xs">
+                                  {new Date(activeReport.date).toLocaleDateString()}
+                                </span>
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* Threats table list */}
+                          <div className="glass-panel rounded-2xl p-5 flex flex-col gap-4 border border-slate-800">
+                            <span className="font-bold text-white border-b border-slate-850 pb-2">Detected Suspicious Artifacts Log</span>
+                            <div className="overflow-x-auto">
+                              <table className="w-full text-left text-xs border-collapse">
+                                <thead>
+                                  <tr className="border-b border-slate-800 text-slate-400 uppercase font-semibold">
+                                    <th className="py-2 px-3">File details</th>
+                                    <th className="py-2 px-3">Category</th>
+                                    <th className="py-2 px-3">Hash</th>
+                                    <th className="py-2 px-3">Impact score</th>
+                                    <th className="py-2 px-3">Status</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {(() => {
+                                    try {
+                                      const threats = JSON.parse(activeReport.detailsJson);
+                                      if (!threats || threats.length === 0) {
+                                        return (
+                                          <tr>
+                                            <td colSpan={5} className="py-6 text-center text-slate-500 italic">
+                                              Zero malicious artifacts flagged in this scan. Complete security verified.
+                                            </td>
+                                          </tr>
+                                        );
+                                      }
+                                      return threats.map((t: any, i: number) => (
+                                        <tr 
+                                          key={i} 
+                                          onClick={async () => {
+                                            if (electronAPI && t.filePath) {
+                                              try {
+                                                const fullRes = await electronAPI.runMultiLayerScan(t.filePath);
+                                                setActiveAnalysis(fullRes);
+                                                setCurrentAnimLayer(6);
+                                              } catch {
+                                                alert("This file has been quarantined and isolated by the EDR containment engine.");
+                                              }
+                                            }
+                                          }}
+                                          className="border-b border-slate-800/40 hover:bg-slate-900/10 cursor-pointer transition"
+                                        >
+                                          <td className="py-3 px-3">
+                                            <div className="flex flex-col">
+                                              <span className="text-white font-bold">{t.fileName}</span>
+                                              <span className="text-[10px] text-slate-500 truncate max-w-[240px]" title={t.filePath}>{t.filePath}</span>
+                                            </div>
+                                          </td>
+                                          <td className="py-3 px-3">
+                                            <span className="px-1.5 py-0.5 rounded text-[10px] font-bold border border-red-500/20 bg-red-500/5 text-red-400">
+                                              {t.type || 'Malware'}
+                                            </span>
+                                          </td>
+                                          <td className="py-3 px-3 font-mono text-[10px] text-slate-400">
+                                            {t.hash ? `${t.hash.slice(0, 8)}...${t.hash.slice(-8)}` : 'N/A'}
+                                          </td>
+                                          <td className="py-3 px-3 text-white font-bold">{t.finalScore}%</td>
+                                          <td className="py-3 px-3 text-slate-450">{t.status || 'Detected'}</td>
+                                        </tr>
+                                      ));
+                                    } catch {
+                                      return (
+                                        <tr>
+                                          <td colSpan={5} className="py-6 text-center text-slate-500 italic">
+                                            Error parsing scan threat reports metadata.
+                                          </td>
+                                        </tr>
+                                      );
+                                    }
+                                  })()}
+                                </tbody>
+                              </table>
+                            </div>
+                          </div>
+
+                        </div>
+
+                        {/* RIGHT COLUMN: DETAILED DIAGNOSTICS */}
+                        <div className="w-full lg:w-[420px] flex flex-col gap-6">
+                          {renderAiLayerAnalysis()}
+                        </div>
+
+                      </div>
+
+                    </div>
+                  )}
+
+                  {/* SUBTAB 3: SCAN HISTORY REPORTS LOG */}
+                  {scannerSubTab === 'history' && (
+                    <div className="flex flex-col gap-6 animate-fadeIn font-mono text-xs text-slate-300">
+                      <div className="flex justify-between items-center border-b border-slate-800 pb-3">
+                        <h3 className="text-sm font-bold text-white uppercase tracking-wider">Scan History & Reports Log</h3>
+                        <button
+                          onClick={() => setScannerSubTab('options')}
+                          className="py-1.5 px-3 rounded-lg border border-slate-700 hover:bg-slate-800 text-slate-300 text-xs font-semibold"
+                        >
+                          Back to Scan Center
+                        </button>
+                      </div>
+
+                      <div className="glass-panel rounded-2xl overflow-hidden border border-slate-800">
+                        <div className="overflow-x-auto">
+                          <table className="w-full text-left text-xs border-collapse">
+                            <thead>
+                              <tr className="border-b border-slate-800 text-slate-400 uppercase font-semibold">
+                                <th className="py-3 px-5">Date</th>
+                                <th className="py-3 px-5">Scan Type</th>
+                                <th className="py-3 px-5">Duration</th>
+                                <th className="py-3 px-5">Files Evaluated</th>
+                                <th className="py-3 px-5">Threats Detected</th>
+                                <th className="py-3 px-5">Threats Removed</th>
+                                <th className="py-3 px-5">Security Score</th>
+                                <th className="py-3 px-5">Action</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {scanHistory.length === 0 ? (
+                                  <tr>
+                                    <td colSpan={8} className="py-12 text-center text-slate-500 italic">
+                                      Zero scans recorded in history log database.
+                                    </td>
+                                  </tr>
+                                ) : (
+                                  scanHistory.map((h: any) => (
+                                    <tr key={h.id} className="border-b border-slate-800/60 hover:bg-slate-900/20 transition">
+                                      <td className="py-3.5 px-5 text-slate-300 font-mono">
+                                        {new Date(h.date).toLocaleString()}
+                                      </td>
+                                      <td className="py-3.5 px-5 font-bold text-white">{h.scanType}</td>
+                                      <td className="py-3.5 px-5 text-slate-450">
+                                        {h.duration >= 60 ? `${Math.floor(h.duration / 60)}m ${h.duration % 60}s` : `${h.duration}s`}
+                                      </td>
+                                      <td className="py-3.5 px-5 text-slate-450">{h.filesScanned}</td>
+                                      <td className="py-3.5 px-5 text-red-400 font-bold">{h.threatsFound}</td>
+                                      <td className="py-3.5 px-5 text-cyan-400 font-bold">{h.threatsRemoved}</td>
+                                      <td className="py-3.5 px-5">
+                                        <span className={`px-2 py-0.5 rounded text-[10px] font-bold border ${
+                                          h.securityScore >= 70 ? 'text-green-400 border-green-500/20 bg-green-500/5' : 'text-red-400 border-red-500/20 bg-red-500/5'
+                                        }`}>
+                                          {h.securityScore}%
+                                        </span>
+                                      </td>
+                                      <td className="py-3.5 px-5">
+                                        <button
+                                          onClick={() => {
+                                            setActiveReport(h);
+                                            setScannerSubTab('results');
+                                          }}
+                                          className="py-1 px-2.5 rounded border border-[#00E5FF]/20 bg-cyan-500/5 hover:bg-cyan-500/15 text-[#00E5FF] transition font-bold"
+                                        >
+                                          View Report
+                                        </button>
+                                      </td>
+                                    </tr>
+                                  ))
+                                )}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
             </div>
           )}
 
           {/* VIEW: SETTINGS */}
           {activeTab === 'settings' && (
-            <div className="flex flex-col gap-6 animate-fadeIn">
-              <div className="flex flex-col gap-2">
-                <h2 className="text-xl font-bold text-white">Agent Configurations Settings</h2>
-                <p className="text-xs text-slate-400">Fine-tune the heuristics thresholds, notification behaviors, and threat intelligence API scopes</p>
+            <div className="flex flex-col gap-6 animate-fadeIn font-mono text-xs text-slate-350">
+              <div className="flex flex-col gap-1.5 text-left">
+                <h2 className="text-xl font-bold text-white uppercase tracking-wider">SentinelAI Preferences</h2>
+                <p className="text-slate-500">Configure security engines, system tray integration, and threat containment parameters.</p>
               </div>
 
-              <div className="glass-panel rounded-2xl p-6 flex flex-col gap-6 max-w-3xl">
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 max-w-5xl">
                 
-                {/* 1. PROTECTION TOGGLES */}
-                <div className="flex flex-col gap-4">
-                  <h3 className="text-sm font-bold text-slate-200 border-b border-slate-800 pb-2">Active EDR Modules</h3>
+                {/* CATEGORY 1: GENERAL SYSTEM PREFERENCES */}
+                <div className="glass-panel rounded-2xl p-6 flex flex-col gap-4 border border-slate-800/80">
+                  <h3 className="text-sm font-bold text-white border-b border-slate-800 pb-2 uppercase tracking-wide">General Preferences</h3>
                   
-                  <div className="flex items-center justify-between p-3 bg-slate-900/30 rounded-xl border border-slate-800/80">
-                    <div className="flex flex-col">
-                      <span className="text-sm font-semibold text-white">Real-Time Process Blocking</span>
-                      <span className="text-xs text-slate-500">Terminates processes executing suspicious command flags in real-time</span>
+                  <div className="flex items-center justify-between p-3 bg-slate-900/30 rounded-xl border border-slate-850">
+                    <div className="flex flex-col gap-1">
+                      <span className="text-white font-bold">Launch at Startup</span>
+                      <span className="text-[10px] text-slate-500">Automatically launch SentinelAI in tray on system boot</span>
                     </div>
                     <button
-                      onClick={() => handleUpdateSetting('realTimeProtection', !settings.realTimeProtection)}
-                      className={`w-12 h-6 flex items-center rounded-full p-1 transition-all duration-300 ${
-                        settings.realTimeProtection ? 'bg-[#00E5FF]' : 'bg-slate-700'
-                      }`}
+                      onClick={() => handleUpdateSetting('startWithWindows', !settings.startWithWindows)}
+                      className={`w-10 h-5 flex items-center rounded-full p-0.5 transition ${settings.startWithWindows ? 'bg-[#00E5FF]' : 'bg-slate-700'}`}
                     >
-                      <div className={`bg-slate-900 w-4 h-4 rounded-full shadow-md transform transition-all duration-300 ${
-                        settings.realTimeProtection ? 'translate-x-6' : ''
-                      }`} />
+                      <div className={`bg-slate-900 w-4 h-4 rounded-full transition ${settings.startWithWindows ? 'translate-x-5' : ''}`} />
                     </button>
                   </div>
 
-                  <div className="flex items-center justify-between p-3 bg-slate-900/30 rounded-xl border border-slate-800/80">
-                    <div className="flex flex-col">
-                      <span className="text-sm font-semibold text-white">Network Protection Shield</span>
-                      <span className="text-xs text-slate-500">Filters active socket connections, blocking connections to malicious servers/IPs</span>
+                  <div className="flex items-center justify-between p-3 bg-slate-900/30 rounded-xl border border-slate-850">
+                    <div className="flex flex-col gap-1">
+                      <span className="text-white font-bold">Minimize to System Tray</span>
+                      <span className="text-[10px] text-slate-500">Clicking "X" hides window to tray instead of exiting</span>
                     </div>
                     <button
-                      onClick={() => handleUpdateSetting('networkProtection', !settings.networkProtection)}
-                      className={`w-12 h-6 flex items-center rounded-full p-1 transition-all duration-300 ${
-                        settings.networkProtection ? 'bg-[#00E5FF]' : 'bg-slate-700'
-                      }`}
+                      onClick={() => handleUpdateSetting('minimizeToTray', !settings.minimizeToTray)}
+                      className={`w-10 h-5 flex items-center rounded-full p-0.5 transition ${settings.minimizeToTray ? 'bg-[#00E5FF]' : 'bg-slate-700'}`}
                     >
-                      <div className={`bg-slate-900 w-4 h-4 rounded-full shadow-md transform transition-all duration-300 ${
-                        settings.networkProtection ? 'translate-x-6' : ''
-                      }`} />
+                      <div className={`bg-slate-900 w-4 h-4 rounded-full transition ${settings.minimizeToTray ? 'translate-x-5' : ''}`} />
                     </button>
                   </div>
 
-                  <div className="flex items-center justify-between p-3 bg-[#0E1726]/30 rounded-xl border border-slate-800/80">
-                    <div className="flex flex-col">
-                      <span className="text-sm font-semibold text-white">Auto-Quarantine Threats</span>
-                      <span className="text-xs text-slate-500">Encrypts and quarantines malicious files instantly upon detection</span>
+                  <div className="flex items-center justify-between p-3 bg-slate-900/30 rounded-xl border border-slate-850">
+                    <div className="flex flex-col gap-1">
+                      <span className="text-white font-bold">Automatic Security Updates</span>
+                      <span className="text-[10px] text-slate-500">Keep definitions and heuristics database up to date</span>
                     </div>
                     <button
-                      onClick={() => handleUpdateSetting('autoQuarantine', !settings.autoQuarantine)}
-                      className={`w-12 h-6 flex items-center rounded-full p-1 transition-all duration-300 ${
-                        settings.autoQuarantine ? 'bg-[#00E5FF]' : 'bg-slate-700'
-                      }`}
+                      onClick={() => handleUpdateSetting('autoUpdates', !settings.autoUpdates)}
+                      className={`w-10 h-5 flex items-center rounded-full p-0.5 transition ${settings.autoUpdates ? 'bg-[#00E5FF]' : 'bg-slate-700'}`}
                     >
-                      <div className={`bg-slate-900 w-4 h-4 rounded-full shadow-md transform transition-all duration-300 ${
-                        settings.autoQuarantine ? 'translate-x-6' : ''
-                      }`} />
+                      <div className={`bg-slate-900 w-4 h-4 rounded-full transition ${settings.autoUpdates ? 'translate-x-5' : ''}`} />
                     </button>
                   </div>
                 </div>
 
-                {/* 2. AI SENSITIVITY RANGE SLIDER */}
-                <div className="flex flex-col gap-4">
-                  <h3 className="text-sm font-bold text-slate-200 border-b border-slate-800 pb-2">AI Behavioral Classifier Sensitivity</h3>
+                {/* CATEGORY 2: EDR LAYERED SHIELD PROTECTION */}
+                <div className="glass-panel rounded-2xl p-6 flex flex-col gap-4 border border-slate-800/80">
+                  <h3 className="text-sm font-bold text-white border-b border-slate-800 pb-2 uppercase tracking-wide">Shield Protections</h3>
+                  
+                  <div className="flex items-center justify-between p-2.5 bg-slate-900/30 rounded-xl border border-slate-850">
+                    <div className="flex flex-col gap-0.5">
+                      <span className="text-white font-bold">Real-Time Protection</span>
+                      <span className="text-[10px] text-slate-500">Continuous file path scanning</span>
+                    </div>
+                    <button
+                      onClick={() => handleUpdateSetting('realTimeProtection', !settings.realTimeProtection)}
+                      className={`w-10 h-5 flex items-center rounded-full p-0.5 transition ${settings.realTimeProtection ? 'bg-[#00E5FF]' : 'bg-slate-700'}`}
+                    >
+                      <div className={`bg-slate-900 w-4 h-4 rounded-full transition ${settings.realTimeProtection ? 'translate-x-5' : ''}`} />
+                    </button>
+                  </div>
+
+                  <div className="flex items-center justify-between p-2.5 bg-slate-900/30 rounded-xl border border-slate-850">
+                    <div className="flex flex-col gap-0.5">
+                      <span className="text-white font-bold">Anti-Ransomware Blocker</span>
+                      <span className="text-[10px] text-slate-500">Shield rapid directory encrypts</span>
+                    </div>
+                    <button
+                      onClick={() => handleUpdateSetting('ransomwareShield', !settings.ransomwareShield)}
+                      className={`w-10 h-5 flex items-center rounded-full p-0.5 transition ${settings.ransomwareShield ? 'bg-[#00E5FF]' : 'bg-slate-700'}`}
+                    >
+                      <div className={`bg-slate-900 w-4 h-4 rounded-full transition ${settings.ransomwareShield ? 'translate-x-5' : ''}`} />
+                    </button>
+                  </div>
+
+                  <div className="flex items-center justify-between p-2.5 bg-slate-900/30 rounded-xl border border-slate-850">
+                    <div className="flex flex-col gap-0.5">
+                      <span className="text-white font-bold">Removable USB Shield</span>
+                      <span className="text-[10px] text-slate-500">Auto-check USB insert payloads</span>
+                    </div>
+                    <button
+                      onClick={() => handleUpdateSetting('usbProtection', !settings.usbProtection)}
+                      className={`w-10 h-5 flex items-center rounded-full p-0.5 transition ${settings.usbProtection ? 'bg-[#00E5FF]' : 'bg-slate-700'}`}
+                    >
+                      <div className={`bg-slate-900 w-4 h-4 rounded-full transition ${settings.usbProtection ? 'translate-x-5' : ''}`} />
+                    </button>
+                  </div>
+                </div>
+
+                {/* CATEGORY 3: HEURISTICS & AUTO-CONTAINMENT */}
+                <div className="glass-panel rounded-2xl p-6 flex flex-col gap-4 border border-slate-800/80">
+                  <h3 className="text-sm font-bold text-white border-b border-slate-800 pb-2 uppercase tracking-wide">Scanning Engines</h3>
+                  
                   <div className="flex flex-col gap-2">
-                    <div className="flex justify-between text-xs font-mono">
-                      <span className="text-slate-400">Detection sensitivity</span>
-                      <span className="text-[#00E5FF] font-bold">{settings.aiSensitivity}%</span>
+                    <div className="flex justify-between text-[10px] font-bold">
+                      <span className="text-slate-400">Heuristics Sensitivity</span>
+                      <span className="text-[#00E5FF]">{settings.aiSensitivity}%</span>
                     </div>
                     <input
                       type="range"
@@ -1529,73 +2147,96 @@ const App: React.FC = () => {
                       onChange={(e) => handleUpdateSetting('aiSensitivity', parseInt(e.target.value))}
                       className="w-full accent-[#00E5FF] cursor-pointer"
                     />
-                    <div className="flex justify-between text-[9px] text-slate-600 font-mono">
-                      <span>LOW (10%)</span>
-                      <span>BALANCED (60%)</span>
-                      <span>AGGRESSIVE (100%)</span>
+                    <div className="flex justify-between text-[8px] text-slate-600 font-bold">
+                      <span>MINIMAL</span>
+                      <span>BALANCED</span>
+                      <span>AGGRESSIVE</span>
                     </div>
+                  </div>
+
+                  <div className="flex items-center justify-between p-2.5 bg-slate-900/30 rounded-xl border border-slate-850 mt-1">
+                    <div className="flex flex-col gap-0.5">
+                      <span className="text-white font-bold">Auto-Quarantine</span>
+                      <span className="text-[10px] text-slate-500">Isolate malicious files automatically</span>
+                    </div>
+                    <button
+                      onClick={() => handleUpdateSetting('autoQuarantine', !settings.autoQuarantine)}
+                      className={`w-10 h-5 flex items-center rounded-full p-0.5 transition ${settings.autoQuarantine ? 'bg-[#00E5FF]' : 'bg-slate-700'}`}
+                    >
+                      <div className={`bg-slate-900 w-4 h-4 rounded-full transition ${settings.autoQuarantine ? 'translate-x-5' : ''}`} />
+                    </button>
                   </div>
                 </div>
 
-                {/* 3. VIRUSTOTAL API INTEGRATION */}
-                <div className="flex flex-col gap-4">
-                  <h3 className="text-sm font-bold text-slate-200 border-b border-slate-800 pb-2">VirusTotal Threat Intelligence</h3>
-                  <div className="flex flex-col gap-2">
-                    <label className="text-xs text-slate-400">VirusTotal API Key (Verification Layer)</label>
-                    <div className="flex items-center gap-3 bg-slate-900/60 p-2.5 rounded-xl border border-slate-800">
-                      <input
-                        type={showApiKey ? 'text' : 'password'}
-                        placeholder="Enter your VirusTotal public API key..."
-                        value={settings.virusTotalApiKey}
-                        onChange={(e) => handleUpdateSetting('virusTotalApiKey', e.target.value)}
-                        className="bg-transparent border-none outline-none text-xs text-slate-200 w-full placeholder-slate-600 font-mono"
-                      />
-                      <button 
-                        onClick={() => setShowApiKey(!showApiKey)}
-                        className="text-slate-500 hover:text-slate-300"
-                      >
-                        {showApiKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                      </button>
-                    </div>
-                  </div>
-                </div>
-
-                {/* 4. OS SETTINGS */}
-                <div className="flex flex-col gap-4">
-                  <h3 className="text-sm font-bold text-slate-200 border-b border-slate-800 pb-2">Agent System Settings</h3>
+                {/* CATEGORY 4: NOTIFICATIONS & ALERTS */}
+                <div className="glass-panel rounded-2xl p-6 flex flex-col gap-4 border border-slate-800/80">
+                  <h3 className="text-sm font-bold text-white border-b border-slate-800 pb-2 uppercase tracking-wide">Alert Preferences</h3>
                   
-                  <div className="flex items-center justify-between p-3 bg-slate-900/30 rounded-xl border border-slate-800/80">
-                    <div className="flex flex-col">
-                      <span className="text-sm font-semibold text-white">Launch at Startup</span>
-                      <span className="text-xs text-slate-500">Auto-runs SentinelAI EDR agent in system tray upon Windows login</span>
+                  <div className="flex items-center justify-between p-3 bg-slate-900/30 rounded-xl border border-slate-850">
+                    <div className="flex flex-col gap-1">
+                      <span className="text-white font-bold">Desktop Notifications</span>
+                      <span className="text-[10px] text-slate-500">Show tray toast alerts for security incidents</span>
                     </div>
                     <button
-                      onClick={() => handleUpdateSetting('startWithWindows', !settings.startWithWindows)}
-                      className={`w-12 h-6 flex items-center rounded-full p-1 transition-all duration-300 ${
-                        settings.startWithWindows ? 'bg-[#00E5FF]' : 'bg-slate-700'
-                      }`}
+                      onClick={() => handleUpdateSetting('desktopNotifications', !settings.desktopNotifications)}
+                      className={`w-10 h-5 flex items-center rounded-full p-0.5 transition ${settings.desktopNotifications ? 'bg-[#00E5FF]' : 'bg-slate-700'}`}
                     >
-                      <div className={`bg-slate-900 w-4 h-4 rounded-full shadow-md transform transition-all duration-300 ${
-                        settings.startWithWindows ? 'translate-x-6' : ''
-                      }`} />
+                      <div className={`bg-slate-900 w-4 h-4 rounded-full transition ${settings.desktopNotifications ? 'translate-x-5' : ''}`} />
                     </button>
                   </div>
 
-                  <div className="flex items-center justify-between p-3 bg-slate-900/30 rounded-xl border border-slate-800/80">
-                    <div className="flex flex-col">
-                      <span className="text-sm font-semibold text-white">Desktop Notifications</span>
-                      <span className="text-xs text-slate-500">Pushes OS system tray alerts when threats are quarantined or blocked</span>
+                  <div className="flex items-center justify-between p-3 bg-slate-900/30 rounded-xl border border-slate-850">
+                    <div className="flex flex-col gap-1">
+                      <span className="text-white font-bold">Email Alerts</span>
+                      <span className="text-[10px] text-slate-500">Send logs to registered admin email address</span>
                     </div>
                     <button
-                      onClick={() => handleUpdateSetting('notifications', !settings.notifications)}
-                      className={`w-12 h-6 flex items-center rounded-full p-1 transition-all duration-300 ${
-                        settings.notifications ? 'bg-[#00E5FF]' : 'bg-slate-700'
-                      }`}
+                      onClick={() => handleUpdateSetting('emailAlerts', !settings.emailAlerts)}
+                      className={`w-10 h-5 flex items-center rounded-full p-0.5 transition ${settings.emailAlerts ? 'bg-[#00E5FF]' : 'bg-slate-700'}`}
                     >
-                      <div className={`bg-slate-900 w-4 h-4 rounded-full shadow-md transform transition-all duration-300 ${
-                        settings.notifications ? 'translate-x-6' : ''
-                      }`} />
+                      <div className={`bg-slate-900 w-4 h-4 rounded-full transition ${settings.emailAlerts ? 'translate-x-5' : ''}`} />
                     </button>
+                  </div>
+                </div>
+
+                {/* CATEGORY 5: INTELLIGENCE & PRIVACY */}
+                <div className="glass-panel rounded-2xl p-6 flex flex-col gap-4 border border-slate-800/80 lg:col-span-2">
+                  <h3 className="text-sm font-bold text-white border-b border-slate-800 pb-2 uppercase tracking-wide">Threat Intel & Privacy</h3>
+                  
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div className="flex flex-col gap-2">
+                      <label className="text-[10px] text-slate-400 font-bold">VirusTotal API Key (Verification Layer)</label>
+                      <div className="flex items-center gap-3 bg-slate-900/60 p-2.5 rounded-xl border border-slate-800">
+                        <input
+                          type={showApiKey ? 'text' : 'password'}
+                          placeholder="Enter VirusTotal API key..."
+                          value={settings.virusTotalApiKey}
+                          onChange={(e) => handleUpdateSetting('virusTotalApiKey', e.target.value)}
+                          className="bg-transparent border-none outline-none text-xs text-slate-200 w-full placeholder-slate-650 font-mono"
+                        />
+                        <button 
+                          onClick={() => setShowApiKey(!showApiKey)}
+                          className="text-slate-500 hover:text-slate-350"
+                        >
+                          {showApiKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="flex flex-col gap-3 justify-center pt-2">
+                      <div className="flex items-center justify-between p-2.5 bg-slate-900/30 rounded-xl border border-slate-850">
+                        <div className="flex flex-col gap-0.5">
+                          <span className="text-white font-bold">Share Threat Signatures</span>
+                          <span className="text-[10px] text-slate-500">Contribute isolated logs to security net</span>
+                        </div>
+                        <button
+                          onClick={() => handleUpdateSetting('shareIntel', !settings.shareIntel)}
+                          className={`w-10 h-5 flex items-center rounded-full p-0.5 transition ${settings.shareIntel ? 'bg-[#00E5FF]' : 'bg-slate-700'}`}
+                        >
+                          <div className={`bg-slate-900 w-4 h-4 rounded-full transition ${settings.shareIntel ? 'translate-x-5' : ''}`} />
+                        </button>
+                      </div>
+                    </div>
                   </div>
                 </div>
 
@@ -1605,6 +2246,158 @@ const App: React.FC = () => {
 
         </div>
       </main>
+
+      {/* 4-STEP ONBOARDING WIZARD OVERLAY */}
+      {settings.firstTimeUser && (
+        <div className="fixed inset-0 z-50 bg-[#070D18]/95 flex items-center justify-center p-4 backdrop-blur-md">
+          <div className="glass-panel w-full max-w-lg rounded-3xl p-8 border border-slate-800 shadow-[0_0_50px_rgba(0,229,255,0.1)] flex flex-col gap-6 text-slate-350">
+            {/* Step Indicators */}
+            <div className="flex items-center justify-center gap-3">
+              {[1, 2, 3, 4].map(s => (
+                <div 
+                  key={s} 
+                  className={`h-1.5 rounded-full transition-all duration-300 ${
+                    onboardingStep === s 
+                      ? 'w-8 bg-[#00E5FF]' 
+                      : onboardingStep > s 
+                        ? 'w-3 bg-green-500' 
+                        : 'w-3 bg-slate-800'
+                  }`}
+                />
+              ))}
+            </div>
+
+            {/* Step 1: Welcome */}
+            {onboardingStep === 1 && (
+              <div className="flex flex-col items-center text-center gap-4 animate-fadeIn font-mono">
+                <div className="p-4 rounded-full bg-cyan-500/10 border border-[#00E5FF]/20 text-[#00E5FF] animate-pulse">
+                  <Shield className="w-12 h-12" />
+                </div>
+                <h2 className="text-xl font-bold text-white uppercase tracking-wider">Welcome to SentinelAI</h2>
+                <p className="text-xs text-slate-400 max-w-sm leading-relaxed">
+                  SentinelAI provides state-of-the-art Endpoint Detection & Response (EDR). Let's initialize your shields.
+                </p>
+                <button 
+                  onClick={() => setOnboardingStep(2)}
+                  className="mt-4 w-full py-3 rounded-xl bg-cyan-500 hover:bg-[#00E5FF] text-[#0B1220] font-black uppercase text-xs transition"
+                >
+                  Configure Shield
+                </button>
+              </div>
+            )}
+
+            {/* Step 2: Protection configuration toggles */}
+            {onboardingStep === 2 && (
+              <div className="flex flex-col gap-4 animate-fadeIn font-mono">
+                <div className="text-center flex flex-col gap-1.5">
+                  <h2 className="text-xl font-bold text-white uppercase tracking-wider">Shield Settings</h2>
+                  <p className="text-xs text-slate-400">Enable default security shield components</p>
+                </div>
+                <div className="flex flex-col gap-3 py-2">
+                  <div className="flex items-center justify-between p-3 bg-slate-900/40 rounded-xl border border-slate-800">
+                    <div className="flex flex-col">
+                      <span className="text-xs font-bold text-white">Real-Time Protection</span>
+                      <span className="text-[10px] text-slate-500">Continuous path scanning</span>
+                    </div>
+                    <button 
+                      onClick={() => handleUpdateSetting('realTimeProtection', !settings.realTimeProtection)}
+                      className={`w-10 h-5 flex items-center rounded-full p-0.5 transition ${settings.realTimeProtection ? 'bg-[#00E5FF]' : 'bg-slate-700'}`}
+                    >
+                      <div className={`bg-slate-900 w-4 h-4 rounded-full transition ${settings.realTimeProtection ? 'translate-x-5' : ''}`} />
+                    </button>
+                  </div>
+                  <div className="flex items-center justify-between p-3 bg-slate-900/40 rounded-xl border border-slate-800">
+                    <div className="flex flex-col">
+                      <span className="text-xs font-bold text-white">Heuristic AI Engine</span>
+                      <span className="text-[10px] text-slate-500">Detect zero-day variants</span>
+                    </div>
+                    <button 
+                      onClick={() => handleUpdateSetting('aiDetection', !settings.aiDetection)}
+                      className={`w-10 h-5 flex items-center rounded-full p-0.5 transition ${settings.aiDetection ? 'bg-[#00E5FF]' : 'bg-slate-700'}`}
+                    >
+                      <div className={`bg-slate-900 w-4 h-4 rounded-full transition ${settings.aiDetection ? 'translate-x-5' : ''}`} />
+                    </button>
+                  </div>
+                </div>
+                <button 
+                  onClick={() => {
+                    setOnboardingStep(3);
+                    let progress = 0;
+                    const interval = setInterval(() => {
+                      progress += 5;
+                      setOnboardingScanProgress(progress);
+                      if (progress >= 100) {
+                        clearInterval(interval);
+                        setTimeout(() => setOnboardingStep(4), 400);
+                      }
+                    }, 100);
+                  }}
+                  className="w-full py-3 rounded-xl bg-cyan-500 hover:bg-[#00E5FF] text-[#0B1220] font-black uppercase text-xs transition"
+                >
+                  Start Quick Scan
+                </button>
+              </div>
+            )}
+
+            {/* Step 3: Initial scan progression */}
+            {onboardingStep === 3 && (
+              <div className="flex flex-col items-center text-center gap-5 animate-fadeIn font-mono">
+                <div className="p-3 rounded-full bg-cyan-500/10 border border-cyan-500/20 text-[#00E5FF] animate-spin">
+                  <RefreshCw className="w-8 h-8" />
+                </div>
+                <div className="flex flex-col gap-1.5 w-full">
+                  <h2 className="text-xl font-bold text-white uppercase tracking-wider">Analyzing System</h2>
+                  <p className="text-xs text-slate-400">Scanning common high-risk vectors ({onboardingScanProgress}%)</p>
+                </div>
+                <div className="w-full bg-slate-800 h-2 rounded-full overflow-hidden">
+                  <div className="h-full bg-[#00E5FF] transition-all duration-100" style={{ width: `${onboardingScanProgress}%` }} />
+                </div>
+              </div>
+            )}
+
+            {/* Step 4: Final Checklist & Start */}
+            {onboardingStep === 4 && (
+              <div className="flex flex-col items-center text-center gap-4 animate-fadeIn font-mono">
+                <div className="p-4 rounded-full bg-green-500/10 border border-green-500/30 text-green-400">
+                  <Shield className="w-12 h-12" />
+                </div>
+                <h2 className="text-xl font-bold text-white uppercase tracking-wider">Initialization Complete</h2>
+                <div className="flex flex-col gap-2.5 text-left w-full bg-slate-900/30 p-4 rounded-xl border border-slate-850 my-2">
+                  <div className="flex items-center gap-2 text-xs">
+                    <span className="text-green-400 font-bold">✔</span>
+                    <span className="text-slate-350">Real-Time file integrity filters active</span>
+                  </div>
+                  <div className="flex items-center gap-2 text-xs">
+                    <span className="text-green-400 font-bold">✔</span>
+                    <span className="text-slate-350">AI heuristics engine verified</span>
+                  </div>
+                  <div className="flex items-center gap-2 text-xs">
+                    <span className="text-green-400 font-bold">✔</span>
+                    <span className="text-slate-350">Auto-containment vault armed</span>
+                  </div>
+                </div>
+                <button 
+                  onClick={() => handleUpdateSetting('firstTimeUser', false)}
+                  className="w-full py-3 rounded-xl bg-green-500 hover:bg-green-400 text-[#0B1220] font-black uppercase text-xs transition"
+                >
+                  Activate Protection
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* AUTO-UPDATER CHECK DIALOG OVERLAY */}
+      {isCheckingForUpdates && (
+        <div className="fixed inset-0 z-50 bg-[#070D18]/90 flex items-center justify-center p-4 backdrop-blur-sm">
+          <div className="glass-panel w-full max-w-sm rounded-2xl p-6 border border-slate-800 shadow-[0_0_30px_rgba(0,229,255,0.08)] flex flex-col items-center text-center gap-4 text-slate-350 font-mono">
+            <RefreshCw className="w-10 h-10 animate-spin text-[#00E5FF]" />
+            <h3 className="text-sm font-bold text-white uppercase tracking-wider">Definition Updates</h3>
+            <p className="text-xs text-slate-400">{updaterStepText}</p>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

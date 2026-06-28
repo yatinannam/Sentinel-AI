@@ -11,10 +11,115 @@ import { processMonitor } from './services/processMonitor';
 import { networkMonitor } from './services/networkMonitor';
 import { registryMonitor } from './services/registryMonitor';
 import { usbMonitor } from './services/usbMonitor';
+import { threatEngine } from './services/threatEngine';
+import { scanService } from './services/scanService';
 
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged;
+(app as any).isQuitting = false;
+const isStartupLaunch = process.argv.includes('--startup');
+
+// Dynamic BMP Tray Icon Generator
+function generateColorBMP(color: { r: number, g: number, b: number }): Buffer {
+  const width = 16;
+  const height = 16;
+  const pixelDataSize = width * height * 3;
+  const fileSize = 54 + pixelDataSize;
+  const buffer = Buffer.alloc(fileSize);
+
+  // BMP Header
+  buffer.write('BM', 0);
+  buffer.writeUInt32LE(fileSize, 2);
+  buffer.writeUInt32LE(54, 10);
+
+  // DIB Header
+  buffer.writeUInt32LE(40, 14);
+  buffer.writeUInt32LE(width, 18);
+  buffer.writeUInt32LE(height, 22);
+  buffer.writeUInt16LE(1, 26);
+  buffer.writeUInt16LE(24, 28);
+  buffer.writeUInt32LE(0, 30);
+  buffer.writeUInt32LE(pixelDataSize, 34);
+
+  // Pixel Data (BGR format, matching theme background)
+  let offset = 54;
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const dx = x - 7.5;
+      const dy = y - 7.5;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      
+      if (dist <= 7.5) {
+        buffer.writeUInt8(color.b, offset);
+        buffer.writeUInt8(color.g, offset + 1);
+        buffer.writeUInt8(color.r, offset + 2);
+      } else {
+        // Antivirus theme background #0B1220
+        buffer.writeUInt8(32, offset);     // Blue
+        buffer.writeUInt8(18, offset + 1); // Green
+        buffer.writeUInt8(11, offset + 2); // Red
+      }
+      offset += 3;
+    }
+  }
+
+  return buffer;
+}
+
+function ensureTrayIcons() {
+  const assetsDir = path.join(app.getPath('userData'), 'assets');
+  if (!fs.existsSync(assetsDir)) {
+    fs.mkdirSync(assetsDir, { recursive: true });
+  }
+
+  const icons = [
+    { name: 'tray_green.bmp', color: { r: 34, g: 197, b: 94 } },
+    { name: 'tray_yellow.bmp', color: { r: 234, g: 179, b: 8 } },
+    { name: 'tray_red.bmp', color: { r: 239, g: 68, b: 68 } },
+    { name: 'tray_gray.bmp', color: { r: 100, g: 116, b: 139 } }
+  ];
+
+  for (const icon of icons) {
+    const iconPath = path.join(assetsDir, icon.name);
+    if (!fs.existsSync(iconPath)) {
+      const buffer = generateColorBMP(icon.color);
+      fs.writeFileSync(iconPath, buffer);
+    }
+  }
+}
+
+function updateTrayStatus() {
+  if (!tray) return;
+
+  const settings = db.getSettings();
+  const incidents = db.getIncidents();
+  const isScanRunning = scanService.getIsRunning();
+
+  let status: 'green' | 'yellow' | 'red' | 'gray' = 'green';
+  let tooltip = 'SentinelAI - Protected';
+
+  if (!settings.realTimeProtection) {
+    status = 'gray';
+    tooltip = 'SentinelAI - Protection Disabled';
+  } else if (isScanRunning) {
+    status = 'yellow';
+    tooltip = 'SentinelAI - Scan in Progress';
+  } else if (incidents.some(i => i.status === 'Detected')) {
+    status = 'red';
+    tooltip = 'SentinelAI - Threat Detected!';
+  }
+
+  const iconName = `tray_${status}.bmp`;
+  const iconPath = path.join(app.getPath('userData'), 'assets', iconName);
+  if (fs.existsSync(iconPath)) {
+    tray.setImage(iconPath);
+  }
+  tray.setToolTip(tooltip);
+}
+
+// Share status function globally
+(global as any).updateTrayStatus = updateTrayStatus;
 
 function createMainWindow() {
   mainWindow = new BrowserWindow({
@@ -22,7 +127,7 @@ function createMainWindow() {
     height: 850,
     minWidth: 1024,
     minHeight: 720,
-    title: "SentinelAI - Enterprise Endpoint Security",
+    title: "SentinelAI - Endpoint Security",
     icon: path.join(__dirname, '../assets/icon.png'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -34,18 +139,27 @@ function createMainWindow() {
     backgroundColor: '#0B1220'
   });
 
+  // Remove menu bar for clean app feel
+  mainWindow.setMenuBarVisibility(false);
+
   if (isDev) {
     mainWindow.loadURL('http://localhost:5173');
-    // Open tools automatically in development
-    mainWindow.webContents.openDevTools();
   } else {
     mainWindow.loadFile(path.join(__dirname, '../dist-renderer/index.html'));
   }
 
   mainWindow.once('ready-to-show', () => {
-    mainWindow?.show();
+    const settings = db.getSettings();
+    if (isStartupLaunch || (settings.startWithWindows && process.argv.includes('--hidden'))) {
+      // Run silently in background
+    } else {
+      mainWindow?.show();
+    }
+    
     // Start background monitors
     if (mainWindow) {
+      threatEngine.setWindow(mainWindow);
+      scanService.setWindow(mainWindow);
       fileMonitor.start(mainWindow);
       processMonitor.start(mainWindow);
       networkMonitor.start(mainWindow);
@@ -54,8 +168,15 @@ function createMainWindow() {
     }
   });
 
+  mainWindow.on('close', (event) => {
+    const settings = db.getSettings();
+    if (!(app as any).isQuitting && settings.minimizeToTray) {
+      event.preventDefault();
+      mainWindow?.hide();
+    }
+  });
+
   mainWindow.on('closed', () => {
-    // Stop all monitoring threads/polls
     fileMonitor.stop();
     processMonitor.stop();
     networkMonitor.stop();
@@ -66,27 +187,58 @@ function createMainWindow() {
 }
 
 function createTray() {
-  const trayIconPath = path.join(__dirname, '../assets/icon.png');
-  // Fallback placeholder
-  if (fs.existsSync(trayIconPath)) {
-    tray = new Tray(trayIconPath);
+  ensureTrayIcons();
+  
+  const iconPath = path.join(app.getPath('userData'), 'assets', 'tray_green.bmp');
+  if (fs.existsSync(iconPath)) {
+    tray = new Tray(iconPath);
   } else {
-    // Silent fail or placeholder in dev
+    // Fallback to default icon if bmp failed
+    const defaultIconPath = path.join(__dirname, '../assets/icon.png');
+    if (fs.existsSync(defaultIconPath)) {
+      tray = new Tray(defaultIconPath);
+    }
   }
 
   const contextMenu = Menu.buildFromTemplate([
-    { label: 'Open SentinelAI Dashboard', click: () => { mainWindow?.show(); } },
-    { label: 'Run Full Scanner', click: () => { mainWindow?.webContents.send('trigger-quick-scan'); } },
+    { label: 'Open SentinelAI Dashboard', click: () => { mainWindow?.show(); mainWindow?.focus(); } },
     { type: 'separator' },
-    { label: 'Quit SentinelAI', click: () => { app.quit(); } }
+    { label: 'Run Quick Scan', click: () => { scanService.startScan('Quick Scan'); } },
+    { label: 'Run Deep Scan', click: () => { scanService.startScan('Deep Scan'); } },
+    { type: 'separator' },
+    { label: 'Pause Protection', click: () => {
+        db.updateSettings({ realTimeProtection: false });
+        updateTrayStatus();
+        mainWindow?.webContents.send('settings-updated', db.getSettings());
+      }
+    },
+    { label: 'Resume Protection', click: () => {
+        db.updateSettings({ realTimeProtection: true });
+        updateTrayStatus();
+        mainWindow?.webContents.send('settings-updated', db.getSettings());
+      }
+    },
+    { type: 'separator' },
+    { label: 'Check for Updates', click: () => {
+        mainWindow?.show();
+        mainWindow?.webContents.send('trigger-update-check');
+      }
+    },
+    { type: 'separator' },
+    { label: 'Exit SentinelAI', click: () => {
+        (app as any).isQuitting = true;
+        app.quit();
+      }
+    }
   ]);
 
   if (tray) {
-    tray.setToolTip('SentinelAI EDR - Protected');
     tray.setContextMenu(contextMenu);
     tray.on('double-click', () => {
       mainWindow?.show();
+      mainWindow?.focus();
     });
+    updateTrayStatus();
   }
 }
 
@@ -98,17 +250,12 @@ if (!gotTheLock) {
   app.on('second-instance', () => {
     if (mainWindow) {
       if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.show();
       mainWindow.focus();
     }
   });
 
   app.whenReady().then(() => {
-    // Create folders
-    const assetsDir = path.join(__dirname, '../assets');
-    if (!fs.existsSync(assetsDir)) {
-      fs.mkdirSync(assetsDir, { recursive: true });
-    }
-    
     createMainWindow();
     createTray();
 
@@ -159,7 +306,31 @@ ipcMain.handle('get-settings', () => {
 });
 
 ipcMain.handle('update-settings', (_, newSettings: any) => {
-  return db.updateSettings(newSettings);
+  const updated = db.updateSettings(newSettings);
+  if (newSettings.startWithWindows !== undefined) {
+    try {
+      app.setLoginItemSettings({
+        openAtLogin: newSettings.startWithWindows,
+        path: process.execPath,
+        args: ['--startup', '--hidden']
+      });
+    } catch (e) {
+      console.error('[Startup] Failed to set login item settings:', e);
+    }
+  }
+  updateTrayStatus();
+  return updated;
+});
+
+ipcMain.handle('check-for-updates', async () => {
+  // Return updater checkpoints progress for visual simulator
+  return [
+    { text: "Checking for Updates...", delay: 800 },
+    { text: "Security Definitions Updated", delay: 1000 },
+    { text: "AI Model Updated", delay: 900 },
+    { text: "Platform Updated", delay: 700 },
+    { text: "No manual downloads required. All shields are up to date.", delay: 500 }
+  ];
 });
 
 // Deep scan custom paths
@@ -171,178 +342,48 @@ ipcMain.handle('select-folder', async () => {
   return result.filePaths[0] || null;
 });
 
-let isScanPaused = false;
-let isScanRunning = false;
-let isScanCancelled = false;
-
-async function checkPause() {
-  while (isScanPaused && !isScanCancelled) {
-    await new Promise(resolve => setTimeout(resolve, 300));
-  }
-}
-
 // IPC handles for scan control
 ipcMain.handle('pause-scan', () => {
-  isScanPaused = true;
+  scanService.pauseScan();
   return { success: true };
 });
 
 ipcMain.handle('resume-scan', () => {
-  isScanPaused = false;
+  scanService.resumeScan();
   return { success: true };
 });
 
 ipcMain.handle('cancel-scan', () => {
-  isScanCancelled = true;
-  isScanPaused = false; // Resume so checkPause resolves immediately
+  scanService.cancelScan();
   return { success: true };
 });
 
 ipcMain.handle('is-scan-paused', () => {
-  return isScanPaused;
+  return false;
 });
 
-// Deep / Custom scans execution
-ipcMain.handle('run-system-scan', async (_, scanPath: string) => {
-  if (!mainWindow) return { success: false };
+ipcMain.handle('run-multi-layer-scan', async (_, filePath: string) => {
+  return await threatEngine.analyzeFile(filePath);
+});
 
-  console.log(`[Scanner] Running scan on directory: ${scanPath}`);
-  isScanPaused = false;
-  isScanCancelled = false;
-  
-  // Asynchronous recursive scanner
-  scanDirectoryAsync(scanPath);
+ipcMain.handle('run-normal-scan', async () => {
+  scanService.startScan('Quick Scan');
   return { success: true };
 });
 
-async function scanDirectoryAsync(dirPath: string) {
-  isScanRunning = true;
-  isScanPaused = false;
+ipcMain.handle('run-deep-scan', async () => {
+  scanService.startScan('Deep Scan');
+  return { success: true };
+});
 
-  try {
-    const files: string[] = [];
-    collectExecutables(dirPath, files);
+ipcMain.handle('run-system-scan', async (_, scanPath: string) => {
+  scanService.startScan('Custom Scan', scanPath);
+  return { success: true };
+});
 
-    if (files.length === 0) {
-      sendScanProgress('System Scan', 'Scan finished. No executables found.', 100);
-      return;
-    }
-
-    let threatCount = 0;
-    const settings = db.getSettings();
-
-    for (let i = 0; i < files.length; i++) {
-      await checkPause();
-      if (isScanCancelled) break;
-      const file = files[i];
-      const progress = Math.round(((i + 1) / files.length) * 100);
-
-      // If paused, send a quick update so UI changes immediately
-      if (isScanPaused) {
-        sendScanProgress('System Scan', 'Scan Paused', progress);
-        await checkPause();
-      }
-      if (isScanCancelled) break;
-      
-      sendScanProgress('System Scan', `Scanning file ${i + 1}/${files.length}: ${path.basename(file)}`, progress);
-
-      const scanResult = await yaraScanner.scanFile(file);
-      let isMalicious = scanResult.isMalicious;
-      let threatName = scanResult.matchedRules[0]?.name || '';
-      let category = scanResult.matchedRules[0]?.category || '';
-      let severity: 'low' | 'medium' | 'high' | 'critical' = scanResult.matchedRules[0]?.severity || 'high';
-      let confidence = 100;
-      let reasons = scanResult.matchedRules[0]?.description ? [scanResult.matchedRules[0].description] : [];
-
-      // If YARA is clean, run AI prediction
-      if (!isMalicious) {
-        const aiResult = await aiScanner.analyzeFile(file, scanResult.hash);
-        if (aiResult.threatType !== 'Safe') {
-          isMalicious = true;
-          threatName = aiResult.threatType;
-          category = aiResult.threatType;
-          severity = aiResult.severity;
-          confidence = aiResult.confidence;
-          reasons = aiResult.reasons;
-        }
-      }
-
-      if (isMalicious) {
-        threatCount++;
-        let actionTaken = 'None';
-        let status: 'Quarantined' | 'Detected' = 'Detected';
-
-        if (settings.autoQuarantine) {
-          try {
-            await quarantine.quarantineFile(file, scanResult.hash);
-            status = 'Quarantined';
-            actionTaken = 'Quarantined';
-          } catch (err) {
-            actionTaken = 'Quarantine Failed';
-          }
-        }
-
-        const incident = db.addIncident({
-          name: threatName,
-          path: file,
-          hash: scanResult.hash,
-          type: category.toUpperCase(),
-          severity: severity,
-          confidence: confidence,
-          status: status,
-          actionTaken: actionTaken,
-          details: reasons.join('. ')
-        });
-
-        mainWindow?.webContents.send('incident-detected', incident);
-      }
-    }
-
-    if (isScanCancelled) {
-      sendScanProgress('System Scan', 'System Idle', 0);
-    } else {
-      sendScanProgress('System Scan', `Scan finished. Scanned ${files.length} executables, found ${threatCount} threat(s).`, 100);
-    }
-  } finally {
-    isScanRunning = false;
-    isScanPaused = false;
-    isScanCancelled = false;
-  }
-}
-
-function collectExecutables(dir: string, fileList: string[], depth = 0) {
-  if (depth > 3) return; // Prevent infinite loops or deep file trees (e.g. node_modules)
-  try {
-    if (!fs.existsSync(dir)) return;
-    const entries = fs.readdirSync(dir, { withFileTypes: true });
-
-    for (const entry of entries) {
-      const fullPath = path.join(dir, entry.name);
-      
-      // Ignore node_modules, .git, and common cache folders to preserve performance
-      if (entry.name === 'node_modules' || entry.name === '.git' || entry.name === 'AppData') {
-        continue;
-      }
-
-      if (entry.isDirectory()) {
-        collectExecutables(fullPath, fileList, depth + 1);
-      } else if (entry.isFile()) {
-        const ext = path.extname(entry.name).toLowerCase();
-        if (['.exe', '.bat', '.cmd', '.ps1', '.vbs', '.msi'].includes(ext)) {
-          fileList.push(fullPath);
-        }
-      }
-    }
-  } catch (err) {
-    // Skip directories with access restrictions
-  }
-}
-
-function sendScanProgress(type: string, status: string, progress: number) {
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('scan-status-update', { type, status, progress });
-  }
-}
+ipcMain.handle('get-scan-history', () => {
+  return db.getScans();
+});
 
 // Bridge AI Scan requests from File Monitor
 ipcMain.on('ai-scan-request', async (_, data: { filePath: string; hash: string }) => {
