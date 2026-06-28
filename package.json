@@ -61,5 +61,10 @@
       "createStartMenuShortcut": true,
       "shortcutName": "SentinelAI"
     }
+  },
+  "allowScripts": {
+    "better-sqlite3@12.11.1": true,
+    "electron@29.4.6": true,
+    "esbuild@0.28.1": true
   }
 }
